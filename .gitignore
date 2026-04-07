@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# BUDDY data (user-specific)
+.claude/
+*.jsonl
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Temp files
+*.tmp
+*.bak
+CLAUDE - 副本.md
+summary.txt
+test_env.py
