@@ -489,17 +489,64 @@ class LLMEngine(QObject):
     def _persist_abort(self):
         """
         Persist cancelled operation — CC-aligned.
-        CC uses createUserInterruptionMessage() which returns role="user".
+        CC keeps all completed messages and patches incomplete tool_use blocks
+        with synthetic error tool_result. Does NOT rollback/delete messages.
 
-        Rollback: remove ALL assistant/tool messages added since query start
-        (not just the current round), then append the interrupt marker.
-        Uses _msg_count_at_query_start which is set once at send_message time
-        and never updated during the tool loop — immune to round-boundary races.
+        Flow:
+        1. Scan messages added since query start
+        2. For any assistant message with tool_use blocks that lack a matching
+           tool_result, emit a synthetic error result (CC: yieldMissingToolResultBlocks)
+        3. Append interruption marker as user message
         """
-        # Rollback all messages added during the entire query
         rollback_point = getattr(self, '_msg_count_at_query_start', None)
-        if rollback_point is not None and rollback_point < len(self._conversation._messages):
-            self._conversation._messages = self._conversation._messages[:rollback_point]
+        if rollback_point is None:
+            rollback_point = 0
+
+        # Collect tool_use IDs that have been sent, and tool_result IDs that exist
+        pending_tool_use_ids = []  # (tool_use_id, tool_name) needing a result
+        answered_ids = set()
+
+        for msg in self._conversation._messages[rollback_point:]:
+            content = msg.get("content")
+            # Scan for tool_use blocks in assistant messages
+            if msg.get("role") == "assistant" and isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tid = block.get("id", "")
+                        tname = block.get("name", "unknown")
+                        if tid:
+                            pending_tool_use_ids.append((tid, tname))
+            # Scan for tool_result blocks in user/tool messages
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        tid = block.get("tool_use_id", "")
+                        if tid:
+                            answered_ids.add(tid)
+            # OpenAI format: role=tool messages have tool_call_id
+            if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                answered_ids.add(msg["tool_call_id"])
+
+        # Patch: emit synthetic error result for unanswered tool_use blocks
+        unanswered = [(tid, tname) for tid, tname in pending_tool_use_ids
+                       if tid not in answered_ids]
+        if unanswered:
+            # Build a single user message with all missing tool_results
+            # (CC: yieldMissingToolResultBlocks yields one per assistant message,
+            #  but a single message with all results also works for the API)
+            result_blocks = []
+            for tid, tname in unanswered:
+                result_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": tid,
+                    "content": f"[{tname} interrupted by user]",
+                    "is_error": True,
+                })
+            self._conversation._messages.append({
+                "role": "user",
+                "content": result_blocks,
+                "timestamp": time.time(),
+            })
 
         # CC-aligned: interruption marker as user message
         self._conversation._messages.append({

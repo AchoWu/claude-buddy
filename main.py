@@ -119,9 +119,22 @@ class BuddyApp:
             command_registry=None,  # TODO: wire CommandRegistry when created in main
         )
 
+        # ── Cron Scheduler ─────────────────────────────────────────
+        from core.cron.scheduler import CronScheduler
+        from pathlib import Path
+        data_dir = Path.home() / ".claude-buddy"
+        self._cron_scheduler = CronScheduler(data_dir, self._on_cron_fire)
+        self._cron_scheduler.start()
+
         # Load previous conversation if available
         if self.engine.conversation.load_last():
             pass  # conversation restored silently
+
+    def _on_cron_fire(self, job_id: str, prompt: str):
+        """Handle cron job firing by sending the prompt to the engine."""
+        print(f"[Cron] Firing job {job_id}: {prompt[:50]}...")
+        if self.engine:
+            self.engine.send_message(prompt)
 
         # Auto-save conversation every 30 seconds
         self._autosave_timer = QTimer()
@@ -415,9 +428,10 @@ class BuddyApp:
         if self._chat_dialog:
             if "cancel" in error.lower():
                 # Abort complete — engine has already persisted the marker via _persist_abort().
-                # Rollback all UI widgets added during the aborted round
-                # (intermediate text, tool call indicators, streaming bubbles)
-                self._chat_dialog.rollback_to_checkpoint()
+                # CC-aligned: do NOT rollback — keep all completed tool calls and text visible.
+                # Just finalize any in-progress streaming bubble and show interrupt indicator.
+                if self._chat_dialog._streaming_bubble is not None:
+                    self._chat_dialog._streaming_bubble = None
                 # Show styled interrupt indicator
                 self._chat_dialog.add_interrupt_message()
             else:
@@ -454,15 +468,16 @@ class BuddyApp:
 
         self._ui_abort_active = False
         if self._chat_dialog:
-            # Rollback all UI widgets added during the aborted round
-            self._chat_dialog.rollback_to_checkpoint()
+            # CC-aligned: do NOT rollback — keep completed work visible
+            if self._chat_dialog._streaming_bubble is not None:
+                self._chat_dialog._streaming_bubble = None
             self._chat_dialog.set_thinking(False)
             self._chat_dialog.set_status("Ready")
 
             # Show styled interrupt indicator
             self._chat_dialog.add_interrupt_message()
 
-        # Persist: rollback conversation + add interrupt marker
+        # Persist: patch incomplete tool_use + add interrupt marker
         # (only if engine didn't already do it via _persist_abort)
         msgs = self.engine.conversation.messages
         has_marker = any(
@@ -470,18 +485,9 @@ class BuddyApp:
             for m in msgs[-3:]
         )
         if not has_marker:
-            # Rollback incomplete query in conversation (use query-start, not round-start)
-            rollback_point = getattr(self.engine, '_msg_count_at_query_start', None)
-            if rollback_point is not None and rollback_point < len(self.engine.conversation._messages):
-                self.engine.conversation._messages = self.engine.conversation._messages[:rollback_point]
-
-            import time as _time
-            self.engine.conversation._messages.append({
-                "role": "user",
-                "content": "[Request interrupted by user]",
-                "timestamp": _time.time(),
-            })
-            self.engine.conversation._dirty = True
+            # Call the engine's persist_abort which now does the right thing
+            # (patch missing tool_results + append marker, no rollback)
+            self.engine._persist_abort()
         self.engine.save_conversation()
 
     # ── Task events ──────────────────────────────────────────────────
