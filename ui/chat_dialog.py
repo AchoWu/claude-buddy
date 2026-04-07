@@ -1029,7 +1029,7 @@ class ChatDialog(QWidget):
                             name = data.get("name", "Tool")
                             args = data.get("arguments", {})
                             summary = str(args.get("command", args.get("file_path", args.get("query", ""))))
-                            self.add_tool_call(name, summary[:60])
+                            self.add_tool_call(name, summary)
                         except (json.JSONDecodeError, AttributeError):
                             pass
                     else:

@@ -404,9 +404,9 @@ class BuddyApp:
                 or ""
             )
             if isinstance(summary, str):
-                summary = summary[:80]
+                summary = summary[:120]
             else:
-                summary = str(summary)[:80]
+                summary = str(summary)[:120]
             self._chat_dialog.add_tool_call(name, summary)
 
     def _on_tool_result(self, name: str, output: str):
