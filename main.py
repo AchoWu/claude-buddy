@@ -130,12 +130,6 @@ class BuddyApp:
         if self.engine.conversation.load_last():
             pass  # conversation restored silently
 
-    def _on_cron_fire(self, job_id: str, prompt: str):
-        """Handle cron job firing by sending the prompt to the engine."""
-        print(f"[Cron] Firing job {job_id}: {prompt[:50]}...")
-        if self.engine:
-            self.engine.send_message(prompt)
-
         # Auto-save conversation every 30 seconds
         self._autosave_timer = QTimer()
         self._autosave_timer.setInterval(30_000)
@@ -172,6 +166,12 @@ class BuddyApp:
         QTimer.singleShot(800, self._check_first_run)
 
     # ── Helpers ──────────────────────────────────────────────────────
+    def _on_cron_fire(self, job_id: str, prompt: str):
+        """Handle cron job firing by sending the prompt to the engine."""
+        print(f"[Cron] Firing job {job_id}: {prompt[:50]}...")
+        if self.engine:
+            self.engine.send_message(prompt)
+
     def _check_first_run(self):
         """If no API key configured, show a hint and open settings."""
         needs_key = PROVIDER_PRESETS.get(self.settings.provider, {}).get("needs_api_key", True)
