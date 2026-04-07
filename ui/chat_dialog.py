@@ -337,7 +337,7 @@ class ToolCallBubble(QFrame):
         self.setStyleSheet("background: transparent;")
 
         # Icon + name + summary (truncate long summaries)
-        display = summary[:60] + "..." if len(summary) > 60 else summary
+        display = summary[:30] + "..." + summary[-30:] if len(summary) > 60 else summary
         self._label = QLabel(
             f"<span style='color:{CLAUDE_ORANGE}'>&#9889;</span> "
             f"<span style='color:rgba(255,255,255,180)'><b>{tool_name}</b></span>"

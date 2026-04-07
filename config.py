@@ -44,7 +44,7 @@ IDLE_TIMEOUT_SEC = 300  # 5 min → sleep
 BUBBLE_SHOW_SEC = 10  # speech bubble visible duration
 BUBBLE_FADE_SEC = 3  # fade-out at the end
 NOTIFICATION_SHOW_SEC = 8
-MAX_TOOL_ROUNDS = 30  # prevent infinite tool loops
+MAX_TOOL_ROUNDS = 200  # prevent infinite tool loops
 
 # ── Default Model Config ─────────────────────────────────────────────────
 DEFAULT_PROVIDER = "taiji"
