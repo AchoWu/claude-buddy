@@ -167,10 +167,22 @@ class BuddyApp:
 
     # ── Helpers ──────────────────────────────────────────────────────
     def _on_cron_fire(self, job_id: str, prompt: str):
-        """Handle cron job firing by sending the prompt to the engine."""
+        """Handle cron job firing by showing the reminder."""
         print(f"[Cron] Firing job {job_id}: {prompt[:50]}...")
-        if self.engine:
-            self.engine.send_message(prompt)
+        import time as _time
+        # Show reminder in speech bubble
+        self.show_bubble(f"⏰ {prompt}")
+        # Show in chat and persist as a system-like user message
+        # (role=user so model knows it's external, _display for friendly UI text)
+        if self._chat_dialog:
+            self._chat_dialog.add_assistant_message(f"⏰ Reminder: {prompt}")
+        self.engine.conversation._messages.append({
+            "role": "user",
+            "content": f"[System] Cron reminder fired: {prompt}",
+            "_display": f"⏰ Reminder: {prompt}",
+            "timestamp": _time.time(),
+        })
+        self.engine.conversation._dirty = True
 
     def _check_first_run(self):
         """If no API key configured, show a hint and open settings."""

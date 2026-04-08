@@ -10,8 +10,12 @@ from __future__ import annotations
 from tools.base import BaseTool
 
 
+_fallback_scheduler = None
+
+
 def get_cron_scheduler():
-    """Get the shared CronScheduler instance from the main app."""
+    """Get the shared CronScheduler instance from the main app, or create a local one."""
+    global _fallback_scheduler
     try:
         from PyQt6.QtWidgets import QApplication
         app = QApplication.instance()
@@ -19,6 +23,20 @@ def get_cron_scheduler():
             return app._buddy._cron_scheduler
     except (ImportError, AttributeError):
         pass
+
+    # Fallback: reuse cached local scheduler for command-line use
+    if _fallback_scheduler is not None:
+        return _fallback_scheduler
+
+    try:
+        from core.cron.scheduler import CronScheduler
+        from pathlib import Path
+        data_dir = Path.home() / ".claude-buddy"
+        _fallback_scheduler = CronScheduler(data_dir, lambda job_id, prompt: print(f"⏰ Cron reminder: {prompt}"))
+        return _fallback_scheduler
+    except Exception:
+        pass
+
     return None
 
 
