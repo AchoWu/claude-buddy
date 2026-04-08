@@ -422,8 +422,26 @@ class BuddyApp:
             self._chat_dialog.add_tool_call(name, summary)
 
     def _on_tool_result(self, name: str, output: str):
-        """Tool execution completed."""
-        pass  # tool results shown as part of the assistant's next message
+        """Tool execution completed. CC-aligned: render diff inline for file tools."""
+        if not self._chat_dialog:
+            return
+        if name in ("FileEdit", "FileWrite") and "--- a/" in output:
+            # Extract file path from first line (e.g. "Successfully replaced... in /path")
+            file_path = ""
+            diff_text = ""
+            for line in output.splitlines():
+                if line.startswith("--- a/"):
+                    # Found diff start — everything from here is the diff
+                    idx = output.index(line)
+                    diff_text = output[idx:]
+                    # Remove the trailing [Show...] hint if present
+                    marker = "[Show the above diff"
+                    if marker in diff_text:
+                        diff_text = diff_text[:diff_text.index(marker)].rstrip()
+                    file_path = line[6:]  # strip "--- a/"
+                    break
+            if diff_text:
+                self._chat_dialog.add_diff_result(file_path, diff_text)
 
     def _on_engine_state(self, state: str):
         """Engine reports state change."""

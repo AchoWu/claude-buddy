@@ -129,13 +129,16 @@ class BashTool(BaseTool):
             is_windows = platform.system() == "Windows"
             if is_windows:
                 result = subprocess.run(
-                    command, shell=True, capture_output=True, text=True,
+                    command, shell=True, capture_output=True,
+                    text=True, encoding="utf-8", errors="replace",
                     timeout=timeout, cwd=self._cwd,
-                    env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                    env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                         "PYTHONUTF8": "1"},
                 )
             else:
                 result = subprocess.run(
-                    ["/bin/bash", "-c", command], capture_output=True, text=True,
+                    ["/bin/bash", "-c", command], capture_output=True,
+                    text=True, encoding="utf-8", errors="replace",
                     timeout=timeout, cwd=self._cwd,
                     env={**os.environ, "PYTHONIOENCODING": "utf-8"},
                 )
@@ -185,13 +188,16 @@ class BashTool(BaseTool):
                 is_windows = platform.system() == "Windows"
                 if is_windows:
                     result = subprocess.run(
-                        command, shell=True, capture_output=True, text=True,
+                        command, shell=True, capture_output=True,
+                        text=True, encoding="utf-8", errors="replace",
                         timeout=timeout, cwd=self._cwd,
-                        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                        env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                             "PYTHONUTF8": "1"},
                     )
                 else:
                     result = subprocess.run(
-                        ["/bin/bash", "-c", command], capture_output=True, text=True,
+                        ["/bin/bash", "-c", command], capture_output=True,
+                        text=True, encoding="utf-8", errors="replace",
                         timeout=timeout, cwd=self._cwd,
                         env={**os.environ, "PYTHONIOENCODING": "utf-8"},
                     )

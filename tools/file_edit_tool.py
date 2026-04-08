@@ -4,9 +4,11 @@ File Edit Tool v2 — CC-aligned enhancements:
   - UTF-16LE auto-detection via BOM
   - Read-before-edit enforcement via FileReadState
   - Staleness detection (file changed since last read)
+  - Unified diff output (CC-aligned: structuredPatch)
 """
 
 import hashlib
+import difflib
 from pathlib import Path
 from tools.base import BaseTool
 
@@ -75,6 +77,28 @@ def _detect_encoding(file_path: Path) -> str:
     return "utf-8"
 
 
+def _generate_diff(old_content: str, new_content: str, file_path: str,
+                   context_lines: int = 3) -> str:
+    """Generate a unified diff string (CC-aligned: structuredPatch).
+    Shows added/removed lines with @@ hunk headers."""
+    old_lines = old_content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
+    diff = difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{file_path}",
+        tofile=f"b/{file_path}",
+        n=context_lines,
+    )
+    result = "".join(diff)
+    if not result:
+        return ""
+    # Cap diff output to avoid flooding context
+    lines = result.splitlines()
+    if len(lines) > 60:
+        lines = lines[:55] + [f"... ({len(lines) - 55} more lines)"]
+    return "\n".join(lines)
+
+
 class FileEditTool(BaseTool):
     name = "FileEdit"
     description = (
@@ -90,6 +114,7 @@ class FileEditTool(BaseTool):
         "2. Copy the exact text from FileRead output (after the line number prefix)\n"
         "3. Use that as old_string\n"
         "4. Provide new_string as the replacement\n\n"
+        "IMPORTANT: After a successful edit, the tool result contains a unified diff.\n"
         "REMINDER: ALWAYS FileRead before FileEdit. NEVER guess the file contents."
     )
     input_schema = {
@@ -188,7 +213,7 @@ class FileEditTool(BaseTool):
 
     def _do_replace(self, file_path: Path, content: str, old_string: str,
                     new_string: str, replace_all: bool, encoding: str) -> str:
-        """Perform the actual replacement and save."""
+        """Perform the actual replacement, save, and return a diff."""
         count = content.count(old_string)
         if count > 1 and not replace_all:
             return (
@@ -215,4 +240,9 @@ class FileEditTool(BaseTool):
                 str(file_path), mtime=new_mtime, content_hash=new_hash
             )
 
-        return f"Successfully replaced {replacements} occurrence(s) in {file_path}"
+        # Generate diff for display (CC-aligned: structuredPatch)
+        diff = _generate_diff(content, new_content, str(file_path))
+        return (
+            f"Successfully replaced {replacements} occurrence(s) in {file_path}\n"
+            f"{diff}"
+        )

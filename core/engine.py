@@ -1377,7 +1377,12 @@ class LLMEngine(QObject):
                     + f"\n\n... [{truncated:,} chars truncated] ...\n\n"
                     + output_str[-tail_size:]
                 )
-            self.tool_result.emit(tc.name, output_str[:300])
+            # CC-aligned: emit full output for file tools (UI renders diff directly)
+            # For other tools, truncate to 300 for the signal
+            if tc.name in ("FileEdit", "FileWrite"):
+                self.tool_result.emit(tc.name, output_str)
+            else:
+                self.tool_result.emit(tc.name, output_str[:300])
             # CC-aligned: fire post_tool_use hook (non-blocking)
             if self._hook_registry:
                 self._hook_registry.fire_async("post_tool_use", {

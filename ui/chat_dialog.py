@@ -363,6 +363,96 @@ class ToolCallBubble(QFrame):
         layout.addStretch()
 
 
+class DiffBubble(QFrame):
+    """CC-aligned: inline diff display rendered directly from tool result.
+    Shows unified diff with green (+) / red (-) lines immediately after tool execution."""
+
+    # Colors for diff syntax highlighting
+    _ADD_COLOR = "#A8D08D"      # green for added lines
+    _DEL_COLOR = "#E06C75"      # red for removed lines
+    _HUNK_COLOR = "#61AFEF"     # blue for @@ headers
+    _CTX_COLOR = "rgba(255,255,255,100)"  # dim for context lines
+    _META_COLOR = "rgba(255,255,255,60)"  # dimmer for --- +++ headers
+
+    def __init__(self, file_path: str, diff_text: str, num_add: int = 0,
+                 num_del: int = 0, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background: transparent;")
+
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(30, 30, 30, 220);
+                border: 1px solid rgba(255,255,255,30);
+                border-left: 2px solid {self._HUNK_COLOR};
+                border-radius: 8px;
+            }}
+        """)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(10, 8, 10, 8)
+        card_layout.setSpacing(2)
+
+        # Header: file path + stats
+        short_path = file_path
+        if len(short_path) > 60:
+            short_path = "..." + short_path[-57:]
+        stats = ""
+        if num_add:
+            stats += f" <span style='color:{self._ADD_COLOR}'>+{num_add}</span>"
+        if num_del:
+            stats += f" <span style='color:{self._DEL_COLOR}'>-{num_del}</span>"
+        header = QLabel(
+            f"<span style='color:rgba(255,255,255,150); font-size:11px;'>"
+            f"{short_path}</span>{stats}"
+        )
+        header.setTextFormat(Qt.TextFormat.RichText)
+        header.setStyleSheet("background: transparent; border: none; padding: 0 2px;")
+        card_layout.addWidget(header)
+
+        # Diff lines (syntax highlighted)
+        diff_html = self._highlight_diff(diff_text)
+        diff_label = QLabel(diff_html)
+        diff_label.setTextFormat(Qt.TextFormat.RichText)
+        diff_label.setWordWrap(True)
+        diff_label.setStyleSheet(
+            "background: transparent; border: none; padding: 2px 4px;"
+            "font-family: Consolas, 'Courier New', monospace; font-size: 11px;"
+        )
+        card_layout.addWidget(diff_label)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(42, 2, 42, 2)
+        outer.addWidget(card)
+
+    def _highlight_diff(self, text: str) -> str:
+        """Convert unified diff text to syntax-highlighted HTML."""
+        lines = text.splitlines()
+        html_lines = []
+        max_lines = 40  # cap display
+        for i, line in enumerate(lines):
+            if i >= max_lines:
+                html_lines.append(
+                    f"<span style='color:{self._META_COLOR}'>"
+                    f"... ({len(lines) - max_lines} more lines)</span>"
+                )
+                break
+            escaped = (line.replace("&", "&amp;").replace("<", "&lt;")
+                       .replace(">", "&gt;").replace(" ", "&nbsp;"))
+            if line.startswith("+++") or line.startswith("---"):
+                html_lines.append(f"<span style='color:{self._META_COLOR}'>{escaped}</span>")
+            elif line.startswith("@@"):
+                html_lines.append(f"<span style='color:{self._HUNK_COLOR}'>{escaped}</span>")
+            elif line.startswith("+"):
+                html_lines.append(f"<span style='color:{self._ADD_COLOR}'>{escaped}</span>")
+            elif line.startswith("-"):
+                html_lines.append(f"<span style='color:{self._DEL_COLOR}'>{escaped}</span>")
+            else:
+                html_lines.append(f"<span style='color:{self._CTX_COLOR}'>{escaped}</span>")
+        return "<br>".join(html_lines)
+
+
 class InterruptBubble(QFrame):
     """User-initiated interruption indicator — visually distinct from tool calls."""
 
@@ -1067,6 +1157,14 @@ class ChatDialog(QWidget):
 
     def add_tool_call(self, tool_name: str, summary: str = ""):
         bubble = ToolCallBubble(tool_name, summary)
+        self._insert_message(bubble)
+
+    def add_diff_result(self, file_path: str, diff_text: str):
+        """CC-aligned: show diff inline immediately after FileEdit/FileWrite."""
+        # Count additions and deletions
+        num_add = sum(1 for l in diff_text.splitlines() if l.startswith("+") and not l.startswith("+++"))
+        num_del = sum(1 for l in diff_text.splitlines() if l.startswith("-") and not l.startswith("---"))
+        bubble = DiffBubble(file_path, diff_text, num_add, num_del)
         self._insert_message(bubble)
 
     def add_interrupt_message(self):
