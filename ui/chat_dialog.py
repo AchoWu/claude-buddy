@@ -1062,37 +1062,74 @@ class ChatDialog(QWidget):
             return
 
         import re
+        import json as _json
         has_any = False
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
             ts = msg.get("timestamp")
 
-            # Skip system/tool role messages
-            if role in ("system", "tool"):
+            # ── Diff rendering (provider-agnostic via _diff/_diffs metadata) ──
+            diff_data = msg.get("_diff")
+            if diff_data:
+                self.add_diff_result(diff_data.get("file_path", ""), diff_data.get("text", ""))
+                has_any = True
+            for d in msg.get("_diffs", []):
+                self.add_diff_result(d.get("file_path", ""), d.get("text", ""))
+                has_any = True
+
+            # ── Skip system messages ──
+            if role == "system":
                 continue
 
-            # Extract text from various content formats
+            # ── OpenAI tool result: role=tool ──
+            if role == "tool":
+                # Already handled _diff above; skip displaying raw tool output
+                continue
+
+            # ── Anthropic tool_result: role=user, content is list of tool_result blocks ──
+            if role == "user" and isinstance(content, list):
+                has_tool_result = any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content
+                )
+                if has_tool_result:
+                    # Already handled _diffs above; skip displaying raw tool results
+                    continue
+
+            # ── Extract text from various content formats ──
             if isinstance(content, dict):
                 content = content.get("content", str(content))
             if isinstance(content, list):
-                parts = []
+                text_parts = []
+                tool_use_blocks = []
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        parts.append(block.get("text", ""))
-                content = "\n".join(parts) if parts else ""
+                    if isinstance(block, dict):
+                        btype = block.get("type", "")
+                        if btype == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif btype == "tool_use":
+                            tool_use_blocks.append(block)
+                # Render Anthropic-style tool_use blocks as ToolCallBubbles
+                for tu in tool_use_blocks:
+                    name = tu.get("name", "Tool")
+                    inp = tu.get("input", {})
+                    summary = str(inp.get("command", inp.get("file_path", inp.get("query", ""))))
+                    self.add_tool_call(name, summary[:120])
+                    has_any = True
+                content = "\n".join(text_parts) if text_parts else ""
 
             if not isinstance(content, str) or not content.strip():
                 continue
 
             text = content.strip()
 
-            # Skip tool result messages
+            # ── Skip PromptTool-format tool result text ──
             if text.startswith("[Tool Result"):
                 continue
 
+            # ── User messages ──
             if role == "user":
-                # Use _display field if available (e.g., "/init" instead of raw prompt)
                 display = msg.get("_display", "")
                 show_text = display if display else text
                 if show_text == "[Request interrupted by user]":
@@ -1101,29 +1138,27 @@ class ChatDialog(QWidget):
                     continue
                 self.add_user_message(show_text, timestamp=ts)
                 has_any = True
+
+            # ── Assistant messages ──
             elif role == "assistant":
-                # Split into text parts and tool_call parts, render each appropriately
-                # Find all <tool_call> blocks
+                # Split into text parts and <tool_call> parts (PromptTool format)
                 tool_call_pattern = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL)
                 parts = tool_call_pattern.split(text)
-                # parts = [text_before, json1, text_between, json2, text_after, ...]
                 for i, part in enumerate(parts):
                     part = part.strip()
                     if not part:
                         continue
                     if i % 2 == 1:
-                        # This is a JSON tool call block
+                        # JSON tool call block (PromptTool format)
                         try:
-                            import json
-                            data = json.loads(part)
+                            data = _json.loads(part)
                             name = data.get("name", "Tool")
                             args = data.get("arguments", {})
                             summary = str(args.get("command", args.get("file_path", args.get("query", ""))))
                             self.add_tool_call(name, summary)
-                        except (json.JSONDecodeError, AttributeError):
+                        except (_json.JSONDecodeError, AttributeError):
                             pass
                     else:
-                        # Normal text — render as assistant message
                         if part:
                             self.add_assistant_message(part, timestamp=ts)
 

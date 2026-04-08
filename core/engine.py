@@ -1053,6 +1053,43 @@ class LLMEngine(QObject):
             else:
                 self._conversation._messages.append(tool_result_msg)
 
+            # ── Step 9b: Tag diff metadata on tool result messages ──
+            # CC-aligned: UI renders diffs directly from structured data.
+            # Attach _diff to the correct tool result message for persistence.
+            # Works across all providers: single msg (Anthropic/PromptTool)
+            # or multi msgs (OpenAI role=tool).
+            for tc, res in zip(tool_calls, results):
+                if tc.name in ("FileEdit", "FileWrite") and res and not res.get("is_error"):
+                    output = res.get("output", "")
+                    if "--- a/" in output:
+                        idx = output.index("--- a/")
+                        diff_text = output[idx:]
+                        first_line = diff_text.splitlines()[0] if diff_text else ""
+                        file_path = first_line[6:] if first_line.startswith("--- a/") else ""
+                        diff_data = {"file_path": file_path, "text": diff_text}
+                        # Find the message that contains this tool's result
+                        for m in reversed(self._conversation._messages[-len(tool_calls) * 2:]):
+                            mc = m.get("content")
+                            # OpenAI: role=tool with tool_call_id
+                            if m.get("role") == "tool" and m.get("tool_call_id") == tc.id:
+                                m["_diff"] = diff_data
+                                break
+                            # Anthropic/PromptTool: role=user with content list containing tool_result
+                            if isinstance(mc, list):
+                                for block in mc:
+                                    if isinstance(block, dict) and block.get("type") == "tool_result" \
+                                       and block.get("tool_use_id") == tc.id:
+                                        m.setdefault("_diffs", [])
+                                        m["_diffs"].append(diff_data)
+                                        break
+                                else:
+                                    continue
+                                break
+                            # PromptTool: role=user with text containing [Tool Result: FileEdit]
+                            if isinstance(mc, str) and f"[Tool Result: {tc.name}]" in mc and "--- a/" in mc:
+                                m["_diff"] = diff_data
+                                break
+
             # ── Step 10: Tool use summary (CC: toolUseSummaryGenerator) ─
             # CC: after ≥2 tool calls, fire-and-forget summary generation
             if len(tool_calls) >= 2 and self._provider:
