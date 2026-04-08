@@ -24,6 +24,7 @@ from core.tool_registry import ToolRegistry
 from core.task_manager import TaskManager
 from core.commands import CommandRegistry
 from core.settings import Settings, PROVIDER_PRESETS
+from core.evolution import EvolutionManager
 
 
 class BuddyApp:
@@ -88,10 +89,15 @@ class BuddyApp:
         self.engine._streaming_enabled = self.settings.streaming_enabled
         # Share file-read state between engine (conversation) and tool registry
         file_read_state = self.engine.conversation.file_read_state
+        
+        # Create evolution manager for self-modification capabilities
+        self._evolution_mgr = EvolutionManager()
+
         self._tool_registry = ToolRegistry(
             task_manager=self.task_manager,
             file_read_state=file_read_state,
             engine=self.engine,
+            evolution_manager=self._evolution_mgr,
         )
         self._tool_registry.register_all_to_engine(self.engine)
         # Wire plan mode state into engine for tool blocking
