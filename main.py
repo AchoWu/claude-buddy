@@ -172,17 +172,12 @@ class BuddyApp:
         import time as _time
         # Show reminder in speech bubble
         self.show_bubble(f"⏰ {prompt}")
-        # Show in chat and persist as a system-like user message
-        # (role=user so model knows it's external, _display for friendly UI text)
+        # Show in chat as assistant message (buddy side)
+        reminder_text = f"⏰ Reminder: {prompt}"
         if self._chat_dialog:
-            self._chat_dialog.add_assistant_message(f"⏰ Reminder: {prompt}")
-        self.engine.conversation._messages.append({
-            "role": "user",
-            "content": f"[System] Cron reminder fired: {prompt}",
-            "_display": f"⏰ Reminder: {prompt}",
-            "timestamp": _time.time(),
-        })
-        self.engine.conversation._dirty = True
+            self._chat_dialog.add_assistant_message(reminder_text)
+        # Persist as assistant message so it stays on buddy side after reload
+        self.engine.conversation.add_assistant_message(reminder_text)
 
     def _check_first_run(self):
         """If no API key configured, show a hint and open settings."""

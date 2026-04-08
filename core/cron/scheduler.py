@@ -72,6 +72,7 @@ class CronScheduler:
         self._jobs: dict[str, CronJob] = {}
         self._timer = None  # QTimer, set up by start()
         self._load_durable()
+        self._notification_tool = None
 
     def start(self):
         """Start the 1-second polling loop. Requires QApplication running."""
@@ -148,6 +149,9 @@ class CronScheduler:
                         self._on_fire(jid, job.prompt)
                     except Exception:
                         pass
+                
+                # Send desktop notification
+                self._send_notification(jid, job.prompt)
 
                 if not job.recurring:
                     expired.append(jid)
@@ -157,6 +161,30 @@ class CronScheduler:
             self._jobs.pop(jid, None)
         if expired:
             self._save_durable()
+
+    def _get_notification_tool(self):
+        """Lazily get PushNotificationTool instance."""
+        if self._notification_tool is None:
+            try:
+                from tools.push_notification_tool import PushNotificationTool
+                self._notification_tool = PushNotificationTool()
+            except ImportError:
+                self._notification_tool = None
+        return self._notification_tool
+
+    def _send_notification(self, job_id: str, prompt: str):
+        """Send desktop notification for cron job firing."""
+        notification_tool = self._get_notification_tool()
+        if notification_tool:
+            try:
+                truncated_prompt = prompt[:100] + '...' if len(prompt) > 100 else prompt
+                notification_tool.execute({
+                    "title": "⏰ 定时提醒",
+                    "message": f"定时任务 {job_id} 已触发\n内容: {truncated_prompt}",
+                    "timeout": 10
+                })
+            except Exception:
+                pass
 
     def _apply_jitter(self, job: CronJob, now: datetime) -> bool:
         """CC: deterministic jitter to spread load. Returns True if should fire now."""
