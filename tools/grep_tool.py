@@ -25,6 +25,8 @@ class GrepTool(BaseTool):
         "- Case-insensitive search with case_insensitive=true\n"
         "- Uses ripgrep (rg) if available, otherwise Python fallback\n\n"
         "Default: returns up to 250 matching lines with file:line: content format.\n\n"
+        "When you are doing an open-ended search that may require multiple rounds of "
+        "globbing and grepping, use the Agent tool instead to do the search for you.\n\n"
         "REMINDER: NEVER use Bash (grep, rg, findstr) to search file content. Always use Grep."
     )
     input_schema = {

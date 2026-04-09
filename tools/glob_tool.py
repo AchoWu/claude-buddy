@@ -20,6 +20,8 @@ class GlobTool(BaseTool):
         "- Returns matching file paths sorted by modification time (newest first)\n"
         "- Supports an optional path parameter to search in a specific directory\n"
         "- Returns up to 200 results\n\n"
+        "When you are doing an open-ended search that may require multiple rounds of "
+        "globbing and grepping, use the Agent tool instead to do the search for you.\n\n"
         "REMINDER: NEVER use Bash (find, ls, dir) to search for files. Always use Glob."
     )
     input_schema = {

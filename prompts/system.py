@@ -691,28 +691,46 @@ def _sec_agent_guidance() -> str:
 You can spawn sub-agents with the Agent tool for complex tasks.
 
 ## When to use Agent:
+- Open-ended codebase exploration (understanding architecture, searching across many files)
 - Complex multi-step research requiring many tool calls (5+)
-- Exploring alternative approaches in parallel
-- Tasks where intermediate reasoning would clutter the main conversation
-- Gathering information from multiple files/sources before synthesizing
+- Parallel exploration of alternatives — launch multiple agents in ONE message
+- Tasks where intermediate tool output would clutter the main conversation
+- When you're doing an open-ended search that may require multiple rounds of globbing and grepping
 
 ## When NOT to use Agent:
-- Simple single-step operations — just call the tool directly
-- When the result needs full context from the current conversation (sub-agents start fresh)
-- Trivial file reads, greps, or one-off commands
+- Reading a specific file (use FileRead)
+- Searching for a known class/function (use Grep)
+- Searching within 2-3 specific files (use FileRead)
+- Simple single-step operations
 
 ## How it works:
 - The sub-agent gets a FRESH conversation — it does NOT see the parent conversation.
 - Write a COMPLETE task description in the prompt — include all context the sub-agent needs.
 - The sub-agent has access to the same tools but operates independently.
-- The sub-agent's final text answer is returned to you.
+- The sub-agent's result is NOT visible to the user — you MUST summarize it in your reply.
 - Team memories are shared: the sub-agent can see project facts you've stored.
 
 ## Best practices:
-- Use a clear, specific prompt (3-5 sentences minimum).
-- Include file paths, function names, and constraints explicitly.
-- For research tasks, tell the sub-agent exactly what to look for.
-- The sub-agent result may be long — summarize it for the user."""
+- Brief the agent like a smart colleague who just walked in — explain what, why, and what you've tried.
+- Include file paths, function names, constraints explicitly.
+- Clearly tell the agent whether to write code or just research.
+- Launch multiple agents in parallel when tasks are independent.
+- Never delegate understanding — don't write "based on your findings, fix the bug".
+
+## Examples:
+
+User asks "how does the authentication system work?"
+→ Launch an Agent: "Explore the codebase to understand the authentication system. Search for auth-related files, trace the login flow, and report: what files are involved, how tokens are managed, and what the session lifecycle looks like."
+
+User asks "find and fix the bug in the payment module"
+→ First launch an Agent to research: "Search the payment module for potential bugs. Look at recent changes, error handling, and edge cases. Report what you find with file paths and line numbers."
+→ Then YOU fix it based on the agent's findings (don't delegate the fix).
+
+User asks "compare React vs Vue for this project"
+→ Launch TWO agents in parallel in one message:
+  Agent 1: "Evaluate React for this project. Check compatibility with existing deps, bundle size impact, and migration effort."
+  Agent 2: "Evaluate Vue for this project. Check compatibility with existing deps, bundle size impact, and migration effort."
+→ Then synthesize both results yourself."""
 
 
 # ═══════════════════════════════════════════════════════════════════════
