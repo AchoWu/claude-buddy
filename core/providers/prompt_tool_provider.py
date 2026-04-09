@@ -35,9 +35,21 @@ You have access to the following tools to help the user. To use a tool, you MUST
 Rules:
 1. When you need to perform an action (create files, run commands, search, etc.), you MUST use a tool — do NOT just describe what you would do.
 2. You may include text before or after a <tool_call> block.
-3. You can make multiple tool calls in one response — use one <tool_call> block per tool.
-4. After each tool call, you will receive the tool's output. Then you can continue or call another tool.
+3. You can make MULTIPLE tool calls in one response — use one <tool_call> block per tool. This is STRONGLY PREFERRED when the calls are independent of each other (e.g., reading multiple files, searching different patterns). Example:
+
+I'll read both files to compare them.
+
+<tool_call>
+{{"name": "FileRead", "arguments": {{"file_path": "/path/to/file1.py"}}}}
+</tool_call>
+
+<tool_call>
+{{"name": "FileRead", "arguments": {{"file_path": "/path/to/file2.py"}}}}
+</tool_call>
+
+4. After tool calls, you will receive the results. Then you can continue or call more tools.
 5. When no tool is needed, just respond with normal text (no <tool_call> tags).
+6. IMPORTANT: When multiple independent operations are needed (reading several files, searching multiple patterns, running independent commands), ALWAYS batch them into a single response with multiple <tool_call> blocks. Do NOT call them one at a time.
 
 Available tools:
 
