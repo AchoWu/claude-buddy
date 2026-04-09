@@ -57,8 +57,11 @@ Available tools:
 """
 
 # Regex to extract <tool_call>...</tool_call> blocks
+# NOTE: We capture everything between the tags and then use balanced-brace
+# extraction in _extract_json_object() because simple {.*?} fails when
+# the JSON content itself contains nested braces (e.g. FileWrite with code).
 _TOOL_CALL_RE = re.compile(
-    r'<tool_call>\s*(\{.*?\})\s*</tool_call>',
+    r'<tool_call>\s*(.*?)\s*</tool_call>',
     re.DOTALL,
 )
 
@@ -244,8 +247,12 @@ class PromptToolProvider(BaseProvider):
         tool_calls = []
 
         for match in _TOOL_CALL_RE.finditer(text):
+            raw = match.group(1).strip()
+            json_str = self._extract_json_object(raw)
+            if not json_str:
+                continue
             try:
-                data = json.loads(match.group(1))
+                data = json.loads(json_str)
                 name = data.get("name", "")
                 arguments = data.get("arguments", {})
                 if name not in valid_names:
@@ -259,6 +266,46 @@ class PromptToolProvider(BaseProvider):
                 continue
 
         return tool_calls
+
+    @staticmethod
+    def _extract_json_object(text: str) -> str | None:
+        """Extract the outermost balanced JSON object from text.
+
+        Handles nested braces inside string values (e.g. FileWrite content
+        containing Python code with dicts, f-strings, etc.).
+        Returns the substring from the first '{' to its matching '}',
+        respecting JSON string escaping rules.
+        """
+        start = text.find('{')
+        if start == -1:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+        i = start
+        while i < len(text):
+            ch = text[i]
+            if escape:
+                escape = False
+                i += 1
+                continue
+            if ch == '\\' and in_string:
+                escape = True
+                i += 1
+                continue
+            if ch == '"':
+                in_string = not in_string
+            elif not in_string:
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i + 1]
+            i += 1
+        # Unbalanced — try json.loads on what we have (best effort)
+        return text[start:]
 
     @staticmethod
     def _simplify_message(msg: dict) -> dict:
