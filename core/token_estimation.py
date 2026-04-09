@@ -14,6 +14,18 @@ _tiktoken_available = False
 
 try:
     import tiktoken
+    
+    # For PyInstaller bundled apps, use pre-loaded cache
+    import sys
+    if getattr(sys, 'frozen', False):
+        # Running as bundled executable
+        import os
+        cache_dir = os.path.join(os.path.dirname(sys.executable), 'tiktoken_cache')
+        if os.path.exists(cache_dir):
+            # Set cache directory for tiktoken
+            import tiktoken.core
+            tiktoken.core.data_gym_cache = cache_dir
+    
     _encoder = tiktoken.get_encoding("cl100k_base")  # Claude/GPT-4 encoding
     _tiktoken_available = True
 except ImportError:
@@ -25,7 +37,10 @@ def count_tokens(text: str) -> int:
     if not text:
         return 0
     if _tiktoken_available and _encoder:
-        return len(_encoder.encode(text))
+        try:
+            return len(_encoder.encode(text, disallowed_special=()))
+        except Exception:
+            return _heuristic_count(text)
     return _heuristic_count(text)
 
 

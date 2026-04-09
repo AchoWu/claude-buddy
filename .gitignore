@@ -34,9 +34,14 @@ desktop.ini
 htmlcov/
 .coverage
 
+# PyInstaller
+*.spec
+
 # Temp files
 *.tmp
 *.bak
 CLAUDE - 副本.md
 summary.txt
 test_env.py
+CAPABILITY_MATRIX.md
+CC_DIFF_REPORT.md
