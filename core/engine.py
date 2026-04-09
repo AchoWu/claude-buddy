@@ -1295,13 +1295,14 @@ class LLMEngine(QObject):
 
     # ── Tool Execution Helpers ─────────────────────────────────────
 
-    def _execute_one_tool(self, tc: ToolCall, round_num: int) -> dict:
+    def _execute_one_tool(self, tc: ToolCall, round_num: int, _skip_start_signal: bool = False) -> dict:
         """Execute a single tool call with permission/plan checks. Returns result dict."""
         # Abort check
         if self._abort_signal.aborted:
             return {"output": "Operation cancelled by user.", "is_error": True}
 
-        self.tool_start.emit(tc.name, tc.input)
+        if not _skip_start_signal:
+            self.tool_start.emit(tc.name, tc.input)
         time.sleep(0.05)
         self._session_cost.add_tool_call()
 
@@ -1485,17 +1486,18 @@ class LLMEngine(QObject):
             batches.append(current_batch)
 
         # Execute batches: parallel for safe, sequential for unsafe (single-item)
+        # _skip_start_signal=True because we already emitted tool_start above
         results = [None] * len(tool_calls)
         for batch in batches:
             if len(batch) == 1:
                 idx, tc = batch[0]
-                results[idx] = self._execute_one_tool(tc, round_num)
+                results[idx] = self._execute_one_tool(tc, round_num, _skip_start_signal=True)
             else:
                 # Parallel batch (all concurrency-safe)
                 with ThreadPoolExecutor(max_workers=min(10, len(batch))) as pool:
                     future_to_idx = {}
                     for idx, tc in batch:
-                        future = pool.submit(self._execute_one_tool, tc, round_num)
+                        future = pool.submit(self._execute_one_tool, tc, round_num, True)
                         future_to_idx[future] = idx
                     for future in as_completed(future_to_idx):
                         idx = future_to_idx[future]
