@@ -259,8 +259,8 @@ class MessageBubble(QFrame):
             self._raw_text = text    # store raw markdown for streaming
 
         # Timestamp
-        time_label = QLabel(self._format_time(timestamp))
-        time_label.setStyleSheet(f"""
+        self._time_label = QLabel(self._format_time(timestamp))
+        self._time_label.setStyleSheet(f"""
             QLabel {{
                 color: rgba(255,255,255,80);
                 font-size: 10px;
@@ -274,8 +274,8 @@ class MessageBubble(QFrame):
         bubble_col.setSpacing(2)
         bubble_col.addWidget(self._content_widget)
         if is_user:
-            time_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        bubble_col.addWidget(time_label)
+            self._time_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        bubble_col.addWidget(self._time_label)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 3, 6, 3)
@@ -314,10 +314,13 @@ class MessageBubble(QFrame):
             self._label.setText(self._label.text() + chunk)
 
     def finalize_streaming(self, full_text: str):
-        """Called when streaming ends — re-render the full text as Markdown."""
+        """Called when streaming ends — re-render the full text as Markdown and fix timestamp."""
         if self._is_browser:
             self._raw_text = full_text
             self._label.setText(_MarkdownRenderer.to_html(full_text))
+            # Fix timestamp: update to actual completion time
+            import time
+            self._time_label.setText(self._format_time(time.time()))
 
     @staticmethod
     def _format_time(timestamp: float | None = None) -> str:

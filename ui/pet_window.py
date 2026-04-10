@@ -52,6 +52,8 @@ class PetWindow(QWidget):
         self._sprite_label = QLabel(self)
         self._sprite_label.setFixedSize(PET_SIZE, PET_SIZE)
         self._sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._sprite_label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._sprite_label.setStyleSheet("background: transparent;")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
