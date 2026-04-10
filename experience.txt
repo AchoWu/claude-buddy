@@ -1,0 +1,36 @@
+1.BUDDY的系统提示通过动态注入参数构建（prompts/system.py:4000+行）：cwd提供文件操作上下文，context包含会话信息，extra_tools扩展功能集，
+memory_content集成用户偏好记忆，permission_mode控制权限级别。提示结构包含身份定义、核心规则、工具参考、安全指南和内存内容，
+从prompts/system.py模板加载并实时组装，具有模块化、安全性和用户中心的特点。
+
+2.工具系统通过provider.format_tools()方法（core/providers/目录）将ToolDef对象转换为特定API格式：Anthropic使用原生tool_use格式，
+OpenAI使用function calling格式，PromptToolProvider在系统提示中注入工具描述。
+所有工具都继承BaseTool类（tools/base.py），定义name、description、input_schema和execute方法，支持并发安全和权限控制。
+
+3.LLM引擎的_tool_loop实现（core/engine.py:810-1400）CC对齐的10步工具调用循环：中止检查→主动压缩→Token预算检查→API调用（含错误恢复）→
+添加助手消息到对话历史→发送中间文本（如"I'll search for..."）→终止检查（如果没有工具调用，表示对话结束）→执行工具（并行/顺序）→格式化结果
+→工具摘要。支持Context Too Long的2阶段恢复（core/engine.py:1200+）和Max Output Tokens的token上限提升机制（core/engine.py:1100+），
+包含完整的错误分类、状态跟踪和并行执行优化。
+
+4.错误处理系统实现9种精细分类（core/engine.py:550-650），按恢复策略分为三类：
+- 可重试错误（7种）：RATE_LIMIT(429)、OVERLOADED(529)、SERVER_ERROR、NETWORK_ERROR、TIMEOUT、AUTH_ERROR，
+  采用指数退避重试策略（core/engine.py:580-700），AUTH_ERROR每次重试重新初始化客户端，529错误有独立重试限制（MAX_529_RETRIES=3）
+- 可恢复错误（2种）：CONTEXT_TOO_LONG采用2阶段恢复（collapse drain→reactive compact，core/engine.py:1200+），
+  MAX_OUTPUT_TOKENS采用Token上限提升机制（8k→64k，core/engine.py:1100+）和继续提示
+- 不可重试错误（2种）：INVALID_REQUEST、UNKNOWN，直接抛出异常不重试
+
+5.中断机制采用线程安全的AbortSignal设计（core/providers/base.py:80-103），类似JS的AbortController，包含9个关键中断检测点：
+- 主循环入口（core/engine.py:475）
+- 工具循环每轮开始（core/engine.py:850）
+- 重试等待期间（core/engine.py:698）
+- 流式处理期间（core/engine.py:750）
+- 工具执行期间（core/engine.py:1301）
+- 用户询问等待期间（core/engine.py:1383）
+- API调用期间（core/engine.py:586, 598, 724, 738, 784）
+支持优雅的消息回滚（_persist_abort方法，core/engine.py:489）和状态清理，确保用户取消操作时系统能即时响应并保持对话一致性。
+
+6.Skill技能系统采用CC对齐的按需加载策略（core/services/bundled_skills.py + tools/skill_tool.py + prompts/system.py）：
+- 启动时：BundledSkillManager扫描3种格式的skill定义（扁平JSON、扁平MD、目录式SKILL.md），但只加载名称+描述（描述截断250字符）
+- 系统提示注入：_sec_skills()将skill列表摘要注入系统提示（~1% context），模型知道有哪些skill可用但不占用大量token
+- 按需加载：用户或模型通过SkillTool调用时，才加载完整SKILL.md内容作为工具结果返回，模型按指令执行
+- 目录式skill支持YAML frontmatter（name/description字段），SKILL.md内包含完整工作流程、模板格式、规则约束
+- 关键设计：分离"知道有什么"（列表摘要在系统提示）和"知道怎么做"（完整指令在调用时），避免长skill内容浪费context window

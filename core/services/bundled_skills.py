@@ -83,9 +83,17 @@ class BundledSkillManager:
             self._skills[skill.name] = skill
 
     def _load_user_skills(self):
-        """Scan .buddy/skills/ for user-defined skill files."""
+        """Scan skills directories for user-defined skill files.
+
+        Supports 3 formats:
+        1. Flat JSON files: skills/my-skill.json (with name, description, prompt)
+        2. Flat MD files: skills/my-skill.md (content = prompt)
+        3. Directory skills: skills/my-skill/SKILL.md (CC-aligned: frontmatter + instructions)
+        """
         if not self._skills_dir.exists():
             return
+
+        # Format 1: Flat JSON files
         for f in self._skills_dir.glob("*.json"):
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
@@ -98,22 +106,91 @@ class BundledSkillManager:
                 self._skills[skill.name] = skill
             except Exception:
                 pass
-        # Also scan .claude/skills/ in CWD (CC pattern)
+
+        # Format 2: Flat MD files in skills dir
+        for f in self._skills_dir.glob("*.md"):
+            try:
+                content = f.read_text(encoding="utf-8")
+                name, desc, prompt = self._parse_skill_md(f.stem, content)
+                self._skills[name] = SkillDefinition(
+                    name=name, description=desc, prompt=prompt,
+                )
+            except Exception:
+                pass
+
+        # Format 3: Directory skills with SKILL.md (e.g. skills/news-aggregator-skill/SKILL.md)
+        for d in self._skills_dir.iterdir():
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            skill_file = d / "SKILL.md"
+            if not skill_file.exists():
+                continue
+            try:
+                content = skill_file.read_text(encoding="utf-8")
+                name, desc, prompt = self._parse_skill_md(d.name, content)
+                self._skills[name] = SkillDefinition(
+                    name=name, description=desc, prompt=prompt,
+                )
+            except Exception:
+                pass
+
+        # Also scan .claude/skills/ and .buddy/skills/ in CWD (CC pattern)
         import os
         for skills_dir in [Path(os.getcwd()) / ".claude" / "skills",
                            Path(os.getcwd()) / ".buddy" / "skills"]:
-            if skills_dir.exists():
-                for f in skills_dir.glob("*.md"):
-                    try:
-                        content = f.read_text(encoding="utf-8")
-                        skill = SkillDefinition(
-                            name=f.stem,
-                            description=f"Skill from {f.parent.name}/{f.name}",
-                            prompt=content,
-                        )
-                        self._skills[skill.name] = skill
-                    except Exception:
-                        pass
+            if not skills_dir.exists():
+                continue
+            for f in skills_dir.glob("*.md"):
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    name, desc, prompt = self._parse_skill_md(f.stem, content)
+                    self._skills[name] = SkillDefinition(
+                        name=name, description=desc, prompt=prompt,
+                    )
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _parse_skill_md(default_name: str, content: str) -> tuple[str, str, str]:
+        """Parse a SKILL.md file with optional YAML frontmatter.
+
+        Frontmatter format:
+            ---
+            name: my-skill
+            description: "What this skill does"
+            ---
+
+            # Skill instructions...
+
+        Returns (name, description, prompt).
+        """
+        name = default_name
+        description = ""
+        prompt = content
+
+        # Extract frontmatter if present
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                frontmatter = parts[1].strip()
+                prompt = parts[2].strip()
+                # Simple YAML-like parsing (no dependency needed)
+                for line in frontmatter.splitlines():
+                    line = line.strip()
+                    if line.startswith("name:"):
+                        name = line[5:].strip().strip('"').strip("'")
+                    elif line.startswith("description:"):
+                        description = line[12:].strip().strip('"').strip("'")
+
+        if not description:
+            # Use first non-empty, non-heading line as description
+            for line in prompt.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and not line.startswith("---"):
+                    description = line[:120]
+                    break
+
+        return name, description, prompt
 
     def get(self, name: str) -> SkillDefinition | None:
         return self._skills.get(name)

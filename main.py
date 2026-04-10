@@ -9,7 +9,7 @@ import random
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QPoint, QTimer
 
-from config import APP_NAME, GLOBAL_QSS, PET_SIZE
+from config import APP_NAME, GLOBAL_QSS, PET_SIZE, DATA_DIR
 from ui.pet_window import PetWindow, PetState
 from ui.context_menu import PetContextMenu
 from ui.tray import SystemTray
@@ -108,6 +108,11 @@ class BuddyApp:
         if memory_content:
             self.engine.set_memory(memory_content)
         self.engine.set_memory_manager(self._memory_mgr)
+
+        # ── Skill Manager (CC-aligned: on-demand loading) ──────────────
+        from core.services.bundled_skills import BundledSkillManager
+        self._skill_mgr = BundledSkillManager(DATA_DIR)
+        self.engine.set_skill_manager(self._skill_mgr)
 
         # ── Command Registry ────────────────────────────────────────────
         self._command_registry = CommandRegistry()

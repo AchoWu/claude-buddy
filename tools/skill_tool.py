@@ -44,6 +44,7 @@ class SkillTool(BaseTool):
 
     def __init__(self):
         self._command_registry = None  # injected by ToolRegistry
+        self._skill_mgr = None  # injected by ToolRegistry
 
     def execute(self, input_data: dict) -> str:
         skill_name = input_data.get("skill", "").strip()
@@ -58,7 +59,16 @@ class SkillTool(BaseTool):
             if cmd:
                 return self._command_registry.execute(f"/{skill_name} {args}".strip())
 
-        # 2. Check skills directory for skill files
+        # 2. Check BundledSkillManager (CC-aligned: loads full SKILL.md on demand)
+        if self._skill_mgr:
+            skill = self._skill_mgr.get(skill_name)
+            if skill:
+                prompt = skill.prompt
+                if args:
+                    prompt = prompt.replace("{{args}}", args)
+                return f"[Skill loaded: {skill_name}]\n\n{prompt}"
+
+        # 3. Check skills directory for skill files (legacy fallback)
         skill_file = SKILLS_DIR / f"{skill_name}.json"
         if skill_file.exists():
             return self._load_and_run_skill(skill_file, args)
@@ -67,7 +77,14 @@ class SkillTool(BaseTool):
         if skill_file_md.exists():
             return self._load_prompt_skill(skill_file_md, args)
 
-        # 3. List available skills
+        # 4. Check directory skills (e.g. skills/my-skill/SKILL.md)
+        skill_dir = SKILLS_DIR / skill_name
+        if skill_dir.is_dir():
+            skill_md = skill_dir / "SKILL.md"
+            if skill_md.exists():
+                return self._load_prompt_skill(skill_md, args)
+
+        # 5. List available skills
         available = self._list_available()
         return (
             f"Skill '{skill_name}' not found.\n"

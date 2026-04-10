@@ -346,6 +346,10 @@ class LLMEngine(QObject):
         """Inject MemoryManager for auto-extraction."""
         self._memory_mgr = mgr
 
+    def set_skill_manager(self, mgr):
+        """Inject BundledSkillManager for skill listing in system prompt."""
+        self._skill_mgr = mgr
+
     def set_team_memory(self, store):
         """Inject TeamMemoryStore for agent memory sharing."""
         self._team_memory = store
@@ -823,9 +827,12 @@ class LLMEngine(QObject):
         """
         # Collect dynamic context
         context = collect_context()
+        # CC-aligned: build skill listing (names + descriptions only, not full content)
+        skill_listing = self._build_skill_listing()
         system = build_system_prompt(
             context=context,
             memory_content=self._memory_content,
+            skill_listing=skill_listing,
         )
         formatted_tools = self._provider.format_tools(self._tools) if self._tools else []
 
@@ -1556,6 +1563,23 @@ class LLMEngine(QObject):
                 return True, "API key valid (rate limited)."
             else:
                 return False, f"API error: {self._short_error(e)}"
+
+    def _build_skill_listing(self) -> str | None:
+        """CC-aligned: build skill name+description listing for system prompt.
+        Only names and short descriptions — full content loaded on-demand."""
+        mgr = getattr(self, '_skill_mgr', None)
+        if not mgr:
+            return None
+        skills = mgr.list_skills()
+        if not skills:
+            return None
+        lines = []
+        for s in skills:
+            desc = s.get("description", "")
+            if len(desc) > 250:
+                desc = desc[:247] + "..."
+            lines.append(f"- **{s['name']}**: {desc}")
+        return "\n".join(lines)
 
     def _try_auto_extract(self):
         """

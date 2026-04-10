@@ -650,6 +650,7 @@ QApplication.processEvents()
 ### 学习目标
 - 理解 50+ 斜杠命令的注册机制
 - 理解 Cron 定时调度
+- 理解 Skill 技能系统（CC 对齐的按需加载）
 - 理解 Bridge/Services 扩展体系
 
 ### 核心文件
@@ -659,11 +660,46 @@ QApplication.processEvents()
 | `core/commands.py` | ~2031 | 50+ 斜杠命令 |
 | `core/cron/scheduler.py` | ~206 | CC 对齐的 Cron 调度器 |
 | `core/cron/parser.py` | ~146 | Cron 表达式解析器 |
+| `core/services/bundled_skills.py` | ~180 | Skill 加载与管理 |
+| `tools/skill_tool.py` | ~116 | Skill 工具（模型调用入口）|
 | `core/dream.py` | ~154 | 主动后台任务 |
 | `core/task_manager.py` | ~179 | CC V2 任务系统 |
 | `core/services/hooks.py` | ~241 | Hook 扩展点 |
 | `core/services/plugins.py` | ~326 | 插件加载器 |
 | `core/bridge/server.py` | ~129 | IDE 桥接服务 |
+
+### Skill 技能系统（CC 对齐）
+
+```
+CC 的 Skill 加载策略（BUDDY 已对齐）：
+
+1. 启动时：只加载 skill 列表（名称 + 描述，描述截断 250 字符）
+   → 注入系统提示，让模型知道有哪些 skill 可用
+   → 不加载完整内容，节省 token
+
+2. 用户/模型调用时：按需加载完整 SKILL.md
+   → 模型通过 Skill 工具调用
+   → 完整指令作为工具结果返回
+   → 模型按指令执行
+
+3. Skill 来源（3 种格式）：
+   ~/.claude-buddy/skills/my-skill.json      ← 扁平 JSON
+   ~/.claude-buddy/skills/my-skill.md        ← 扁平 Markdown
+   ~/.claude-buddy/skills/my-skill/SKILL.md  ← 目录式（推荐）
+```
+
+目录式 SKILL.md 支持 YAML frontmatter：
+```markdown
+---
+name: news-aggregator-skill
+description: "Fetch news from 28 sources..."
+---
+
+# Skill Instructions
+...详细的工作流程、模板、规则...
+```
+
+**关键原则**：模型看到的是"我有一个叫 X 的 skill，描述是 Y"。只有调用时才看到完整指令，避免长 skill 内容浪费 context。
 
 ### 命令注册模式
 

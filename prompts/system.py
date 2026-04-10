@@ -36,6 +36,7 @@ def build_system_prompt(
     extra_tools: list[str] | None = None,
     memory_content: str | None = None,
     permission_mode: str = "default",
+    skill_listing: str | None = None,
 ) -> str:
     """
     Build the full system prompt by joining all sections.
@@ -45,6 +46,8 @@ def build_system_prompt(
         context: Dynamic context dict from context_injection module.
         extra_tools: Additional tool names beyond the defaults.
         memory_content: Loaded memory to inject.
+        permission_mode: "default", "auto", or "bypass".
+        skill_listing: Skill names + descriptions summary (CC-aligned: on-demand).
         permission_mode: "default", "auto", or "bypass".
     """
     effective_cwd = cwd or os.getcwd()
@@ -78,6 +81,7 @@ def build_system_prompt(
         _sec_faithful_reporting(),
         _sec_communication(),
         _sec_output_format(),
+        _sec_skills(skill_listing),
         _sec_memory(memory_content),
         _sec_environment(effective_cwd, ctx),
     ]
@@ -800,6 +804,21 @@ IMPORTANT:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+
+
+def _sec_skills(skill_listing: str | None) -> str:
+    """CC-aligned: inject skill name+description listing (NOT full content).
+    Full skill content is loaded on-demand when user/model invokes it."""
+    if not skill_listing:
+        return ""
+    return f"""\
+# Available Skills
+
+The following skills are available. Use the Skill tool to invoke them by name.
+When a skill is invoked, its full instructions will be loaded — you MUST follow
+those instructions exactly, including output format, language, and workflow.
+
+{skill_listing}"""
 
 
 def _sec_memory(memory_content: str | None) -> str:

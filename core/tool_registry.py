@@ -231,10 +231,12 @@ class ToolRegistry:
         self._tools[EnterWorktreeTool().name] = EnterWorktreeTool()
         self._tools[ExitWorktreeTool().name] = ExitWorktreeTool()
 
-        # ── Skill tool: inject command registry (deferred) ────────────
+        # ── Skill tool: inject command registry + skill manager (deferred) ──
         SkillTool = _get_skill_tool()
         skill = SkillTool()
         skill._command_registry = self._command_registry
+        if self._engine and hasattr(self._engine, '_skill_mgr'):
+            skill._skill_mgr = self._engine._skill_mgr
         self._tools[skill.name] = skill
 
         # ── Config tool (deferred) ────────────────────────────────────
