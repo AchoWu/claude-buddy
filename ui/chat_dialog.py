@@ -56,6 +56,54 @@ class AvatarLabel(QLabel):
 class _MarkdownRenderer:
     """Lightweight Markdown to HTML converter for chat bubbles."""
 
+    # Table style constants
+    _TABLE_STYLE = (
+        'border-collapse:collapse;width:100%;margin:6px 0;'
+        'font-size:12px;'
+    )
+    _TH_STYLE = (
+        'background:rgba(255,255,255,0.15);padding:4px 8px;'
+        'border:1px solid rgba(255,255,255,0.25);font-weight:bold;'
+    )
+    _TD_STYLE = (
+        'padding:4px 8px;border:1px solid rgba(255,255,255,0.15);'
+    )
+    _TD_ALT_STYLE = (
+        'padding:4px 8px;border:1px solid rgba(255,255,255,0.15);'
+        'background:rgba(255,255,255,0.05);'
+    )
+
+    @staticmethod
+    def _is_table_separator(line: str) -> bool:
+        """Check if line is a GFM table separator (e.g. |---|:---:|---:| )."""
+        import re
+        stripped = line.strip()
+        if not stripped.startswith('|') and '|' not in stripped:
+            return False
+        cells = [c.strip() for c in stripped.strip('|').split('|')]
+        return all(re.match(r'^:?-{1,}:?$', c) for c in cells if c)
+
+    @staticmethod
+    def _parse_table_row(line: str) -> list:
+        """Split a markdown table row into cell strings."""
+        stripped = line.strip().strip('|')
+        return [c.strip() for c in stripped.split('|')]
+
+    @staticmethod
+    def _parse_table_align(sep_line: str) -> list:
+        """Parse alignment from separator row. Returns list of 'left'/'center'/'right'."""
+        import re
+        cells = [c.strip() for c in sep_line.strip().strip('|').split('|')]
+        aligns = []
+        for c in cells:
+            if c.startswith(':') and c.endswith(':'):
+                aligns.append('center')
+            elif c.endswith(':'):
+                aligns.append('right')
+            else:
+                aligns.append('left')
+        return aligns
+
     @staticmethod
     def to_html(md: str) -> str:
         """Convert markdown text to HTML suitable for QLabel rendering."""
@@ -64,9 +112,15 @@ class _MarkdownRenderer:
         html_lines = []
         in_code_block = False
         in_list = False
+        in_table = False
+        table_aligns = []
+        table_row_count = 0
         code_lang = ""
 
-        for line in lines:
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
             # Fenced code block toggle
             if line.strip().startswith('```'):
                 if not in_code_block:
@@ -75,6 +129,9 @@ class _MarkdownRenderer:
                     if in_list:
                         html_lines.append('</ul>')
                         in_list = False
+                    if in_table:
+                        html_lines.append('</table>')
+                        in_table = False
                     html_lines.append(
                         '<pre style="background:rgba(0,0,0,0.3);padding:8px;'
                         'border-radius:6px;font-family:Consolas,monospace;font-size:12px;">'
@@ -82,12 +139,62 @@ class _MarkdownRenderer:
                 else:
                     in_code_block = False
                     html_lines.append('</pre>')
+                i += 1
                 continue
 
             if in_code_block:
                 escaped = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
                 html_lines.append(escaped)
+                i += 1
                 continue
+
+            # --- GFM Table detection ---
+            # A table starts when: current line has '|', next line is a separator
+            if (not in_table and '|' in line and
+                    i + 1 < len(lines) and _MarkdownRenderer._is_table_separator(lines[i + 1])):
+                # Close open blocks
+                if in_list:
+                    html_lines.append('</ul>')
+                    in_list = False
+                in_table = True
+                table_row_count = 0
+                table_aligns = _MarkdownRenderer._parse_table_align(lines[i + 1])
+                # Emit table open + header row
+                r = _MarkdownRenderer._TABLE_STYLE
+                html_lines.append(f'<table style="{r}">')
+                headers = _MarkdownRenderer._parse_table_row(line)
+                html_lines.append('<tr>')
+                for hi, hdr in enumerate(headers):
+                    align = table_aligns[hi] if hi < len(table_aligns) else 'left'
+                    th_style = _MarkdownRenderer._TH_STYLE + f'text-align:{align};'
+                    html_lines.append(
+                        f'<th style="{th_style}">{_MarkdownRenderer._inline(hdr)}</th>'
+                    )
+                html_lines.append('</tr>')
+                i += 2  # skip separator line
+                continue
+
+            # Inside a table: consume data rows
+            if in_table:
+                if '|' in line:
+                    cells = _MarkdownRenderer._parse_table_row(line)
+                    td_style = _MarkdownRenderer._TD_ALT_STYLE if table_row_count % 2 else _MarkdownRenderer._TD_STYLE
+                    html_lines.append('<tr>')
+                    for ci, cell in enumerate(cells):
+                        align = table_aligns[ci] if ci < len(table_aligns) else 'left'
+                        style = td_style + f'text-align:{align};'
+                        html_lines.append(
+                            f'<td style="{style}">{_MarkdownRenderer._inline(cell)}</td>'
+                        )
+                    html_lines.append('</tr>')
+                    table_row_count += 1
+                    i += 1
+                    continue
+                else:
+                    # Table ended
+                    html_lines.append('</table>')
+                    in_table = False
+                    # fall through to process current line normally
 
             # Headers
             m = re.match(r'^(#{1,6})\s+(.+)$', line)
@@ -102,6 +209,7 @@ class _MarkdownRenderer:
                     f'<p style="font-size:{size};font-weight:bold;margin:6px 0 4px 0;">'
                     f'{_MarkdownRenderer._inline(m.group(2))}</p>'
                 )
+                i += 1
                 continue
 
             # Unordered list
@@ -111,6 +219,7 @@ class _MarkdownRenderer:
                     html_lines.append('<ul style="margin:2px 0 2px 16px;">')
                     in_list = True
                 html_lines.append(f'<li>{_MarkdownRenderer._inline(m.group(1))}</li>')
+                i += 1
                 continue
 
             # Ordered list
@@ -120,6 +229,7 @@ class _MarkdownRenderer:
                     html_lines.append('</ul>')
                     in_list = False
                 html_lines.append(f'<p style="margin:1px 0 1px 16px;">{m.group(1)}. {_MarkdownRenderer._inline(m.group(2))}</p>')
+                i += 1
                 continue
 
             # Close list if we hit a non-list line
@@ -135,23 +245,29 @@ class _MarkdownRenderer:
                     f'padding-left:8px;color:rgba(255,255,255,0.7);margin:2px 0;">'
                     f'{_MarkdownRenderer._inline(text)}</p>'
                 )
+                i += 1
                 continue
 
             # Horizontal rule
             if re.match(r'^[-*_]{3,}\s*$', line.strip()):
                 html_lines.append('<hr style="border:none;border-top:1px solid rgba(255,255,255,0.2);margin:6px 0;">')
+                i += 1
                 continue
 
             # Empty line
             if not line.strip():
                 html_lines.append('<br>')
+                i += 1
                 continue
 
             # Normal paragraph
             html_lines.append(f'<p style="margin:2px 0;">{_MarkdownRenderer._inline(line)}</p>')
+            i += 1
 
         if in_list:
             html_lines.append('</ul>')
+        if in_table:
+            html_lines.append('</table>')
         if in_code_block:
             html_lines.append('</pre>')
 
