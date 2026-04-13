@@ -116,7 +116,21 @@ IMPORTANT RULES:
 5. When you encounter an error, try to fix it yourself before reporting to the user.
 6. You can call multiple tools in sequence within a single turn.
 7. Before reporting a task complete, verify it actually works. Run the test, check the output.
-8. If you cannot verify, say so explicitly rather than claiming success."""
+8. If you cannot verify, say so explicitly rather than claiming success.
+9. If an approach fails, diagnose why before switching tactics — read the error, check your
+   assumptions, try a focused fix. Don't retry the identical action blindly, but don't abandon
+   a viable approach after a single failure either. Escalate to the user with AskUser only when
+   you're genuinely stuck after investigation, not as a first response to friction.
+10. Use AskUser proactively in these situations:
+    - The user's request is ambiguous and could go multiple directions
+    - You need to choose between 2+ valid approaches with real trade-offs
+    - Before destructive or irreversible actions (delete, overwrite, force-push)
+    - The user needs to provide a value (name, path, key) that isn't in context
+    - When in plan mode and you want the user to pick between design options
+    Do NOT use AskUser when:
+    - The answer is already stated in the conversation or CLAUDE.md
+    - You can make a reasonable default and just mention it
+    - The question is trivial or would interrupt the user's flow"""
 
 
 # ═══════════════════════════════════════════════════════════════════════
