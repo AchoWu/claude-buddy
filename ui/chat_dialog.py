@@ -1116,7 +1116,18 @@ class ChatDialog(QWidget):
                     data = _json.loads(json_str)
                     name = data.get("name", "Tool")
                     args = data.get("arguments", {})
-                    summary = str(args.get("command", args.get("file_path", args.get("query", ""))))
+                    # Extract summary: try common arg keys in priority order
+                    summary = ""
+                    for key in ("command", "pattern", "query", "file_path", "url", "path", "prompt"):
+                        val = args.get(key)
+                        if val:
+                            summary = str(val)
+                            break
+                    if not summary:
+                        for val in args.values():
+                            if isinstance(val, str) and val:
+                                summary = val
+                                break
                     parts.append(("tool", (name, summary)))
                     pos = json_end
                     # Skip to closing tag
@@ -1149,6 +1160,20 @@ class ChatDialog(QWidget):
 
         import re
         import json as _json
+
+        def _get_tool_summary(tool_name: str, args: dict) -> str:
+            """Extract a human-readable summary from tool arguments, covering all known tools."""
+            # Priority order: try the most informative arg for the given tool
+            for key in ("command", "pattern", "query", "file_path", "url", "path", "prompt"):
+                val = args.get(key)
+                if val:
+                    return str(val)
+            # Fallback: first non-empty string value in args
+            for val in args.values():
+                if isinstance(val, str) and val:
+                    return val
+            return ""
+
         has_any = False
         for msg in messages:
             role = msg.get("role", "")
@@ -1183,6 +1208,19 @@ class ChatDialog(QWidget):
                     # Already handled _diffs above; skip displaying raw tool results
                     continue
 
+            # ── OpenAI-style tool_calls field (content may be null) ──
+            openai_tool_calls = msg.get("tool_calls") or []
+            for tc in openai_tool_calls:
+                fn = tc.get("function", {})
+                name = fn.get("name", "Tool")
+                try:
+                    args = _json.loads(fn.get("arguments", "{}"))
+                except (_json.JSONDecodeError, TypeError):
+                    args = {}
+                summary = _get_tool_summary(name, args)
+                self.add_tool_call(name, summary[:120])
+                has_any = True
+
             # ── Extract text from various content formats ──
             if isinstance(content, dict):
                 content = content.get("content", str(content))
@@ -1200,7 +1238,7 @@ class ChatDialog(QWidget):
                 for tu in tool_use_blocks:
                     name = tu.get("name", "Tool")
                     inp = tu.get("input", {})
-                    summary = str(inp.get("command", inp.get("file_path", inp.get("query", ""))))
+                    summary = _get_tool_summary(name, inp)
                     self.add_tool_call(name, summary[:120])
                     has_any = True
                 content = "\n".join(text_parts) if text_parts else ""
