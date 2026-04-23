@@ -1056,6 +1056,89 @@ class ChatDialog(QWidget):
         self._load_input_history()
 
     # ── Public API ───────────────────────────────────────────────────
+    def _extract_tool_calls_and_text(self, text: str) -> list:
+        """
+        Extract tool calls and text from assistant message.
+        Properly handles nested braces in JSON by counting them (ignoring escapes).
+        Returns list of tuples: ("text", content) or ("tool", (name, summary))
+        """
+        import re
+        import json as _json
+        import logging
+        
+        parts = []
+        pos = 0
+        
+        for match in re.finditer(r'<tool_call>\s*', text):
+            # Add text before this tool_call
+            if match.start() > pos:
+                before_text = text[pos:match.start()].strip()
+                if before_text:
+                    parts.append(("text", before_text))
+            
+            # Find the matching closing brace by counting braces (accounting for escaping)
+            json_start = match.end()
+            brace_count = 0
+            json_end = -1
+            in_string = False
+            i = json_start
+            
+            while i < len(text):
+                char = text[i]
+                
+                # Handle string state tracking with proper escape handling
+                if char == '"':
+                    # Count preceding backslashes
+                    num_backslashes = 0
+                    j = i - 1
+                    while j >= json_start and text[j] == '\\':
+                        num_backslashes += 1
+                        j -= 1
+                    # If even number of backslashes (or zero), the quote is not escaped
+                    if num_backslashes % 2 == 0:
+                        in_string = not in_string
+                
+                # Only count braces outside strings
+                if not in_string:
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            json_end = i + 1
+                            break
+                
+                i += 1
+            
+            if json_end > 0:
+                json_str = text[json_start:json_end].strip()
+                try:
+                    data = _json.loads(json_str)
+                    name = data.get("name", "Tool")
+                    args = data.get("arguments", {})
+                    summary = str(args.get("command", args.get("file_path", args.get("query", ""))))
+                    parts.append(("tool", (name, summary)))
+                    pos = json_end
+                    # Skip to closing tag
+                    closing_match = re.search(r'\s*</tool_call>', text[json_end:])
+                    if closing_match:
+                        pos = json_end + closing_match.end()
+                except (_json.JSONDecodeError, AttributeError, ValueError) as e:
+                    # Log error for debugging instead of silently failing
+                    logging.debug(f"Failed to parse tool call JSON: {e}")
+                    pos = json_end if json_end > 0 else match.end()
+            else:
+                pos = match.end()
+        
+        # Add remaining text
+        if pos < len(text):
+            remaining = text[pos:].strip()
+            if remaining:
+                parts.append(("text", remaining))
+        
+        return parts
+
+
     def load_history(self, messages: list[dict]):
         """Load conversation history into the chat UI. Called on open."""
         self._loading_history = True  # suppress per-message auto-scroll
@@ -1144,26 +1227,16 @@ class ChatDialog(QWidget):
 
             # ── Assistant messages ──
             elif role == "assistant":
-                # Split into text parts and <tool_call> parts (PromptTool format)
-                tool_call_pattern = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL)
-                parts = tool_call_pattern.split(text)
-                for i, part in enumerate(parts):
-                    part = part.strip()
-                    if not part:
-                        continue
-                    if i % 2 == 1:
-                        # JSON tool call block (PromptTool format)
-                        try:
-                            data = _json.loads(part)
-                            name = data.get("name", "Tool")
-                            args = data.get("arguments", {})
-                            summary = str(args.get("command", args.get("file_path", args.get("query", ""))))
-                            self.add_tool_call(name, summary)
-                        except (_json.JSONDecodeError, AttributeError):
-                            pass
-                    else:
-                        if part:
-                            self.add_assistant_message(part, timestamp=ts)
+                # Use helper to extract tool calls properly (handles nested braces)
+                parts = self._extract_tool_calls_and_text(text)
+                for part_type, part_data in parts:
+                    if part_type == "tool":
+                        name, summary = part_data
+                        self.add_tool_call(name, summary)
+                        has_any = True
+                    elif part_type == "text" and part_data:
+                        self.add_assistant_message(part_data, timestamp=ts)
+                        has_any = True
 
         # Done loading — scroll to bottom once, then re-enable auto-scroll
         self._loading_history = False
