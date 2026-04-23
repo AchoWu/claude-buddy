@@ -45,3 +45,6 @@ summary.txt
 test_env.py
 CAPABILITY_MATRIX.md
 CC_DIFF_REPORT.md
+experience.txt
+test_todo.md
+build.sh

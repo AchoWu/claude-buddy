@@ -156,6 +156,18 @@ class SettingsDialog(QWidget):
         streaming_label.setStyleSheet(label_style)
         form.addRow(streaming_label, self._streaming_check)
 
+        # Thinking / Reasoning toggle (unified: Anthropic thinking + OpenAI/OpenRouter reasoning)
+        self._thinking_check = QCheckBox("Enable Thinking / Reasoning")
+        self._thinking_check.setStyleSheet(self._streaming_check.styleSheet())
+        self._thinking_check.setToolTip(
+            "Enables extended reasoning on supported providers:\n"
+            "- Anthropic: sends thinking parameter\n"
+            "- OpenAI / OpenRouter: sends reasoning parameter"
+        )
+        thinking_label = QLabel("Thinking")
+        thinking_label.setStyleSheet(label_style)
+        form.addRow(thinking_label, self._thinking_check)
+
         # Character selector
         self._char_combo = QComboBox()
         self._char_combo.setStyleSheet(self._provider_combo.styleSheet())
@@ -206,6 +218,7 @@ class SettingsDialog(QWidget):
                 break
 
         self._streaming_check.setChecked(self._settings.streaming_enabled)
+        self._thinking_check.setChecked(self._settings.thinking_enabled)
 
         # Set character combo
         char = self._settings.character
@@ -244,6 +257,7 @@ class SettingsDialog(QWidget):
         self._settings.model = self._model_input.text().strip()
         self._settings.permission_mode = self._perm_combo.currentData()
         self._settings.streaming_enabled = self._streaming_check.isChecked()
+        self._settings.thinking_enabled = self._thinking_check.isChecked()
         self._settings.character = self._char_combo.currentData()
 
         self.settings_changed.emit()

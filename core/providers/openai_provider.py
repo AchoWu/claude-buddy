@@ -18,12 +18,14 @@ class OpenAIProvider(BaseProvider):
         api_key: str,
         model: str = "gpt-4o",
         base_url: str | None = None,
+        reasoning_enabled: bool = False,
     ):
         kwargs = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
         self._client = OpenAI(**kwargs)
         self._model = model
+        self._reasoning_enabled = reasoning_enabled
 
     def call_sync(
         self,
@@ -51,6 +53,12 @@ class OpenAIProvider(BaseProvider):
         }
         if tools:
             kwargs["tools"] = tools
+
+        # CC-aligned: inject reasoning for OpenRouter / compatible providers
+        # when effort or thinking is requested.
+        reasoning_body = self._build_reasoning_extra_body(params)
+        if reasoning_body:
+            kwargs["extra_body"] = reasoning_body
 
         response = self._client.chat.completions.create(**kwargs)
 
@@ -144,6 +152,11 @@ class OpenAIProvider(BaseProvider):
         if tools:
             kwargs["tools"] = tools
 
+        # CC-aligned: inject reasoning for OpenRouter / compatible providers
+        reasoning_body = self._build_reasoning_extra_body(params)
+        if reasoning_body:
+            kwargs["extra_body"] = reasoning_body
+
         stream = self._client.chat.completions.create(**kwargs)
 
         # Accumulate full response for return value
@@ -226,6 +239,31 @@ class OpenAIProvider(BaseProvider):
             ]
 
         return raw, tool_calls, full_text
+
+    def _build_reasoning_extra_body(self, params: LLMCallParams | None) -> dict | None:
+        """Build extra_body for reasoning (OpenRouter-compatible).
+        Returns {"reasoning": {...}} when reasoning is enabled via settings
+        or when effort/thinking is explicitly configured.
+
+        Reasoning config:
+        - reasoning_enabled=True (settings toggle) → {"reasoning": {"enabled": True}}
+        - effort='low'/'medium'/'high' → adds {"effort": ...}
+        - thinking={"budget_tokens": N} → adds {"max_tokens": N}
+        """
+        effort = getattr(params, "effort", None) if params else None
+        thinking = getattr(params, "thinking", None) if params else None
+
+        if not self._reasoning_enabled and not effort and not thinking:
+            return None
+
+        reasoning: dict = {"enabled": True}
+        if effort in ("low", "medium", "high"):
+            reasoning["effort"] = effort
+        if isinstance(thinking, dict):
+            budget = thinking.get("budget_tokens")
+            if isinstance(budget, int) and budget > 0:
+                reasoning["max_tokens"] = budget
+        return {"reasoning": reasoning}
 
     @staticmethod
     def _build_raw_assistant(message) -> dict:

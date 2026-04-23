@@ -361,7 +361,11 @@ class Settings:
         from core.providers.openai_provider import OpenAIProvider
         if not base_url and provider_name in PROVIDER_PRESETS:
             base_url = PROVIDER_PRESETS[provider_name]["base_url"]
-        kwargs = {"api_key": api_key or "ollama", "model": model}
+        kwargs = {
+            "api_key": api_key or "ollama",
+            "model": model,
+            "reasoning_enabled": self.thinking_enabled,
+        }
         if base_url:
             kwargs["base_url"] = base_url
         return OpenAIProvider(**kwargs)
