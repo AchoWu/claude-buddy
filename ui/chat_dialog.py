@@ -18,6 +18,25 @@ from config import (
     SUCCESS_GREEN, ERROR_RED,
 )
 
+
+# Keys checked (in order) when summarizing a tool-call's input for the bubble.
+# Must mirror main.py `_on_tool_start` so live + replayed summaries match.
+_TOOL_SUMMARY_KEYS = (
+    "command", "file_path", "pattern", "query", "url",
+    "skill", "subject", "prompt", "entry", "file", "description",
+)
+
+
+def _summarize_tool_input(inp: dict) -> str:
+    """Pick a human-readable summary string from a tool's input dict."""
+    if not isinstance(inp, dict):
+        return str(inp) if inp else ""
+    for k in _TOOL_SUMMARY_KEYS:
+        v = inp.get(k)
+        if v:
+            return str(v)
+    return ""
+
 # ── Glass-morphism palette ───────────────────────────────────────────────
 GLASS_BG = "rgba(30, 30, 30, 200)"       # semi-transparent dark
 GLASS_HEADER = "rgba(45, 45, 45, 220)"   # slightly more opaque header
@@ -1233,10 +1252,28 @@ class ChatDialog(QWidget):
                 for tu in tool_use_blocks:
                     name = tu.get("name", "Tool")
                     inp = tu.get("input", {})
-                    summary = str(inp.get("command", inp.get("file_path", inp.get("query", ""))))
+                    summary = _summarize_tool_input(inp)
                     self.add_tool_call(name, summary[:120])
                     has_any = True
                 content = "\n".join(text_parts) if text_parts else ""
+
+            # ── OpenAI-style tool_calls field on assistant messages ──
+            # (saved as {"role":"assistant", "content":"", "tool_calls":[...]})
+            if role == "assistant":
+                oai_tool_calls = msg.get("tool_calls") or []
+                for tc in oai_tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                    name = fn.get("name", "Tool")
+                    args_raw = fn.get("arguments", "")
+                    try:
+                        inp = _json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+                    except (_json.JSONDecodeError, TypeError):
+                        inp = {}
+                    summary = _summarize_tool_input(inp) if isinstance(inp, dict) else str(inp)
+                    self.add_tool_call(name, summary[:120])
+                    has_any = True
 
             if not isinstance(content, str) or not content.strip():
                 continue
@@ -1273,8 +1310,8 @@ class ChatDialog(QWidget):
                             data = _json.loads(part)
                             name = data.get("name", "Tool")
                             args = data.get("arguments", {})
-                            summary = str(args.get("command", args.get("file_path", args.get("query", ""))))
-                            self.add_tool_call(name, summary)
+                            summary = _summarize_tool_input(args) if isinstance(args, dict) else str(args)
+                            self.add_tool_call(name, summary[:120])
                         except (_json.JSONDecodeError, AttributeError):
                             pass
                     else:
@@ -1315,6 +1352,9 @@ class ChatDialog(QWidget):
 
     def add_diff_result(self, file_path: str, diff_text: str):
         """CC-aligned: show diff inline immediately after FileEdit/FileWrite."""
+        # Skip empty diffs — nothing to show, and drawing an empty card is ugly.
+        if not diff_text or not diff_text.strip():
+            return
         # Count additions and deletions
         num_add = sum(1 for l in diff_text.splitlines() if l.startswith("+") and not l.startswith("+++"))
         num_del = sum(1 for l in diff_text.splitlines() if l.startswith("-") and not l.startswith("---"))
