@@ -16,6 +16,13 @@ PROVIDER_PRESETS = {
         "needs_api_key": True,
         "needs_base_url": False,
     },
+    "hunyuan": {
+        "label": "混元 Hunyuan (思考模式)",
+        "base_url": "http://api.taiji.woa.com/openapi/v2",
+        "default_model": "hy3-preview",
+        "needs_api_key": True,
+        "needs_base_url": False,
+    },
     "anthropic": {
         "label": "Anthropic Claude",
         "base_url": "",

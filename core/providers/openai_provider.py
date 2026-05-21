@@ -90,12 +90,22 @@ class OpenAIProvider(BaseProvider):
         text = message.content or ""
         raw_content = self._build_raw_assistant(message)
 
+        # Extract reasoning_content (hy3 thinking mode)
+        reasoning = getattr(message, "reasoning_content", None) or ""
+        if reasoning:
+            raw_content["_reasoning"] = reasoning
+            text = f"<thinking>\n{reasoning}\n</thinking>\n\n{text}"
+
         # Extract real token usage
         if response.usage:
-            raw_content["_usage"] = {
+            usage_dict = {
                 "input_tokens": response.usage.prompt_tokens or 0,
                 "output_tokens": response.usage.completion_tokens or 0,
             }
+            details = getattr(response.usage, "completion_tokens_details", None)
+            if details and getattr(details, "reasoning_tokens", None):
+                usage_dict["reasoning_tokens"] = details.reasoning_tokens
+            raw_content["_usage"] = usage_dict
 
         return raw_content, tool_calls, text
 
@@ -238,17 +248,22 @@ class OpenAIProvider(BaseProvider):
                 for tc in tool_calls
             ]
 
+        # Note: In streaming mode, reasoning_content is not available in deltas.
+        # It is only returned in non-streaming (call_sync) responses.
+
         return raw, tool_calls, full_text
 
     def _build_reasoning_extra_body(self, params: LLMCallParams | None) -> dict | None:
-        """Build extra_body for reasoning (OpenRouter-compatible).
-        Returns {"reasoning": {...}} when reasoning is enabled via settings
-        or when effort/thinking is explicitly configured.
+        """Build extra_body for reasoning.
+
+        Supports two formats:
+        - Hunyuan hy3: {"reasoning_effort": "high"} (top-level in request body)
+        - OpenRouter: {"reasoning": {"enabled": True, ...}} (extra_body)
 
         Reasoning config:
-        - reasoning_enabled=True (settings toggle) → {"reasoning": {"enabled": True}}
-        - effort='low'/'medium'/'high' → adds {"effort": ...}
-        - thinking={"budget_tokens": N} → adds {"max_tokens": N}
+        - reasoning_enabled=True (settings toggle) → activate reasoning
+        - effort='low'/'medium'/'high' → control reasoning depth
+        - thinking={"budget_tokens": N} → OpenRouter max_tokens
         """
         effort = getattr(params, "effort", None) if params else None
         thinking = getattr(params, "thinking", None) if params else None
@@ -256,6 +271,11 @@ class OpenAIProvider(BaseProvider):
         if not self._reasoning_enabled and not effort and not thinking:
             return None
 
+        # Hunyuan hy3 uses reasoning_effort as a top-level parameter
+        if "hy3" in self._model.lower() or "hunyuan" in self._model.lower():
+            return {"reasoning_effort": effort or "high"}
+
+        # OpenRouter / generic: nested reasoning object
         reasoning: dict = {"enabled": True}
         if effort in ("low", "medium", "high"):
             reasoning["effort"] = effort
