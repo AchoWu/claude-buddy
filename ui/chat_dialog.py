@@ -952,6 +952,7 @@ class ChatDialog(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMinimumSize(420, 500)
         self.resize(600, 720)
+        self.setAcceptDrops(True)  # Enable drag & drop for files/images
 
         # ── Resize state ────────────────────────────────────────────
         self._resize_edge = None      # which edge is being dragged
@@ -1855,31 +1856,41 @@ class ChatDialog(QWidget):
         return super().eventFilter(obj, event)
 
     def _try_paste_image(self) -> bool:
-        """Quick check if clipboard has image, show chip immediately, load async."""
+        """Check clipboard for image or file, insert appropriate chip. Returns True if handled."""
         from PyQt6.QtWidgets import QApplication
+        import os
 
         clipboard = QApplication.clipboard()
         mime = clipboard.mimeData()
-
-        # Fast check: does clipboard contain image data?
-        has_image = mime and mime.hasImage()
-
-        if not has_image:
-            # Check for image file URLs
-            if mime and mime.hasUrls():
-                for url in mime.urls():
-                    path = url.toLocalFile()
-                    if path and any(path.lower().endswith(ext) for ext in
-                                   ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')):
-                        self._insert_image_chip()
-                        QTimer.singleShot(0, lambda p=path: self._async_load_file(p))
-                        return True
+        if not mime:
             return False
 
-        # Has image — insert chip at cursor
-        self._insert_image_chip()
-        QTimer.singleShot(0, self._async_load_clipboard)
-        return True
+        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+
+        # Check for file URLs in clipboard (copied files from file manager)
+        if mime.hasUrls():
+            handled = False
+            for url in mime.urls():
+                path = url.toLocalFile()
+                if not path or not os.path.isfile(path):
+                    continue
+                ext = os.path.splitext(path)[1].lower()
+                if ext in image_exts:
+                    self._insert_image_chip()
+                    QTimer.singleShot(0, lambda p=path: self._async_load_file(p))
+                else:
+                    self._attach_file(path)
+                handled = True
+            if handled:
+                return True
+
+        # Check for image data in clipboard (e.g. screenshot Ctrl+V)
+        if mime.hasImage():
+            self._insert_image_chip()
+            QTimer.singleShot(0, self._async_load_clipboard)
+            return True
+
+        return False
 
     def _insert_image_chip(self):
         """Insert [Image #N] chip at cursor position in input."""
@@ -2069,6 +2080,46 @@ class ChatDialog(QWidget):
             geo.setTop(new_top)
 
         self.setGeometry(geo)
+
+    def dragEnterEvent(self, event):
+        """Accept drag if it contains files or images."""
+        mime = event.mimeData()
+        if mime and (mime.hasUrls() or mime.hasImage()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        """Handle dropped files/images — insert appropriate chips."""
+        import os
+        mime = event.mimeData()
+        if not mime:
+            event.ignore()
+            return
+
+        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+
+        if mime.hasUrls():
+            for url in mime.urls():
+                path = url.toLocalFile()
+                if not path or not os.path.isfile(path):
+                    continue
+                ext = os.path.splitext(path)[1].lower()
+                if ext in image_exts:
+                    self._insert_image_chip()
+                    QTimer.singleShot(0, lambda p=path: self._async_load_file(p))
+                else:
+                    self._attach_file(path)
+            event.acceptProposedAction()
+        elif mime.hasImage():
+            self._insert_image_chip()
+            QTimer.singleShot(0, self._async_load_clipboard)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def keyPressEvent(self, event: QKeyEvent):
         # Ctrl+V: try to paste image (when focus is NOT on input)
