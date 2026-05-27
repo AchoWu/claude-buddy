@@ -937,6 +937,7 @@ class ChatDialog(QWidget):
 
     message_sent = pyqtSignal(str)   # user typed a message
     image_message_sent = pyqtSignal(str, list)  # (text, [base64_images]) — user sent message with image(s)
+    file_message_sent = pyqtSignal(str)  # user sent message with file content inlined
     abort_requested = pyqtSignal()   # user clicked stop during thinking
     open_settings = pyqtSignal()     # user clicked settings button
     clear_requested = pyqtSignal()   # user clicked clear history button
@@ -1229,6 +1230,7 @@ class ChatDialog(QWidget):
         self._is_thinking = False
         self._pending_images: list[str] = []  # list of base64 images waiting to be sent
         self._image_counter: int = 0          # for [Image #N] chip IDs
+        self._pending_files: dict[str, str] = {}  # {filename: content} — non-image file attachments
 
         container_layout.addWidget(input_frame)
 
@@ -1648,37 +1650,91 @@ class ChatDialog(QWidget):
         self._input.clear()
         self._input.blockSignals(False)
 
-        # If there are pending images, send as image message
+        # Strip chips from user text to get the actual question
+        user_text = re.sub(r'\[Image #\d+\]\s*', '', text).strip()
+        for fname in list(self._pending_files.keys()):
+            user_text = user_text.replace(f'[{fname}]', '').strip()
+
+        # Expand file contents if any
+        file_context = self._expand_file_contents() if self._pending_files else ""
+
         if images_to_send:
-            # Strip all [Image #N] tags from user's actual question
-            user_text = re.sub(r'\[Image #\d+\]\s*', '', text).strip()
+            # Image message (may also include file context)
             display_text = user_text or "Please analyze this image."
             n = len(images_to_send)
             chips = ' '.join(f'[Image #{i+1}]' for i in range(n))
-            self.add_user_message(f"{chips} {display_text}")
-            self.image_message_sent.emit(display_text, images_to_send)
+            file_chips = ' '.join(f'[{f}]' for f in self._pending_files)
+            display_all = f"{chips} {file_chips}".strip()
+            self.add_user_message(f"{display_all} {display_text}")
+            # Combine user text + file context for the model
+            combined_text = f"{display_text}\n\n{file_context}" if file_context else display_text
+            self.image_message_sent.emit(combined_text, images_to_send)
             self._pending_images = []
             self._image_counter = 0
+            self._pending_files = {}
             self._clear_image_preview()
+        elif self._pending_files:
+            # Files only, no images — expand file content inline
+            display_text = user_text or "Please analyze this file."
+            file_chips = ' '.join(f'[{f}]' for f in self._pending_files)
+            self.add_user_message(f"{file_chips} {display_text}")
+            full_message = f"{display_text}\n\n{file_context}" if display_text else file_context
+            self._pending_files = {}
+            self._clear_image_preview()
+            self.message_sent.emit(full_message)
         else:
             self.add_user_message(text)
             self.message_sent.emit(text)
 
     def _on_attach_image(self):
-        """Open file dialog to select an image."""
+        """Open file dialog to select a file (image or document)."""
         from PyQt6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Image", "",
-            "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All Files (*)"
+            self, "Attach File", "",
+            "All Files (*);;Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;Documents (*.txt *.md *.py *.js *.ts *.json *.csv *.docx *.pdf)"
         )
-        if path:
-            # Show tag immediately, load async
-            self._input.setText("[Image attached] ")
-            self._input.setCursorPosition(len(self._input.text()))
+        if not path:
+            return
+
+        import os
+        ext = os.path.splitext(path)[1].lower()
+        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+
+        if ext in image_exts:
+            # Image: existing flow
+            self._insert_image_chip()
             QTimer.singleShot(0, lambda: self._async_load_file(path))
+        else:
+            # Non-image file: read content and insert as [filename] chip
+            self._attach_file(path)
+
+    def _attach_file(self, path: str):
+        """Attach a non-image file — insert path as [filename] chip (CC-aligned: lazy load via FileRead)."""
+        import os
+        filename = os.path.basename(path)
+        abs_path = os.path.abspath(path)
+
+        # Store file path (not content) — model will use FileRead when needed
+        self._pending_files[filename] = abs_path
+
+        # Insert [filename] chip at cursor
+        chip = f"[{filename}] "
+        pos = self._input.cursorPosition()
+        current = self._input.text()
+        new_text = current[:pos] + chip + current[pos:]
+        self._input.setText(new_text)
+        self._input.setCursorPosition(pos + len(chip))
+        self._update_input_style_for_images()
+
+    def _expand_file_contents(self) -> str:
+        """CC-aligned: expand file chips to paths (model uses FileRead to access content)."""
+        parts = []
+        for filename, filepath in self._pending_files.items():
+            parts.append(f"[File: {filename} → {filepath}]")
+        return "\n".join(parts)
 
     def _update_input_style_for_images(self):
-        """Highlight input border orange when images are attached."""
+        """Highlight input border orange when images/files are attached."""
         self._input.setStyleSheet(f"""
             QLineEdit {{
                 background: rgba(255,255,255,8);
@@ -1745,10 +1801,15 @@ class ChatDialog(QWidget):
                 self._clear_image_preview()
 
         # Update input style
-        if self._pending_images or current_chips:
+        if self._pending_images or current_chips or self._pending_files:
             self._update_input_style_for_images()
-        elif not current_chips and not self._pending_images:
+        elif not current_chips and not self._pending_images and not self._pending_files:
             self._clear_image_preview()
+
+        # Sync file chips — if user deletes [filename], remove from pending_files
+        for fname in list(self._pending_files.keys()):
+            if f'[{fname}]' not in text:
+                del self._pending_files[fname]
 
     def _load_input_history(self):
         """Load input history from disk on startup."""
