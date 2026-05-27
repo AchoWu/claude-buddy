@@ -8,13 +8,13 @@ This file provides guidance to Claude Code when working with the BUDDY codebase.
 
 ## Scale
 
-~146 Python files across 6 directories, ~25,000+ lines of code.
+~150 Python files across 6 directories, ~28,000+ lines of code.
 
 ## Tech Stack
 
 - **Language**: Python 3.11+
 - **Desktop UI**: PyQt6 (frameless windows, translucent glass-morphism design)
-- **API Clients**: Anthropic SDK (`anthropic`), OpenAI SDK (`openai`)
+- **API Clients**: Anthropic SDK (`anthropic`), OpenAI SDK (`openai`), Venus SDK (`venus_api_base`)
 - **HTTP**: httpx (async-capable)
 - **Image Processing**: Pillow (sprite sheets, avatar rendering)
 - **HTML to Markdown**: html2text (WebFetch tool)
@@ -25,10 +25,11 @@ This file provides guidance to Claude Code when working with the BUDDY codebase.
 ### Entry Point
 
 `main.py` -- `BuddyApp` class orchestrates everything:
-1. Settings -> PetWindow -> LLMEngine -> ToolRegistry (37 tools) -> MemoryManager
+1. Settings -> PetWindow -> LLMEngine -> ToolRegistry (53 tools) -> MemoryManager
 2. Signal/slot wiring between engine (background thread) and UI (main thread)
 3. Auto-save timer (30s), cron scheduler, dream manager
-4. Qt event loop (`app.exec()`)
+4. Screenshot overlay + Vision pipeline wiring
+5. Qt event loop (`app.exec()`)
 
 ### Core Engine (`core/engine.py`, ~55KB)
 
@@ -48,11 +49,11 @@ This file provides guidance to Claude Code when working with the BUDDY codebase.
 ### Provider System (`core/providers/`)
 
 Three providers, all implementing `BaseProvider`:
-- `AnthropicProvider` -- native tool_use, adaptive thinking, cache_control, effort, structured output
-- `OpenAIProvider` -- function calling format, streaming with tool_calls accumulation
-- `PromptToolProvider` -- for models without native tool support; injects tool descriptions into system prompt, parses `<tool_call>` tags from output
+- `AnthropicProvider` -- native tool_use, adaptive thinking, cache_control, effort, structured output, image content blocks in tool_result
+- `OpenAIProvider` -- function calling format, streaming with tool_calls accumulation, image_url conversion for Vision models
+- `PromptToolProvider` -- for models without native tool support; injects tool descriptions into system prompt, parses `<tool_call>` tags from output, DeepSeek-R1 reasoning_content handling
 
-### Tool System (`tools/`, 37 tools)
+### Tool System (`tools/`, 53 tools)
 
 Each tool in its own file inheriting `BaseTool`:
 - **File ops**: FileRead, FileWrite, FileEdit, Glob, NotebookEdit
@@ -63,6 +64,7 @@ Each tool in its own file inheriting `BaseTool`:
 - **Scheduling**: CronCreate/Delete/List
 - **Plan mode**: EnterPlanMode, ExitPlanMode
 - **Memory/Soul**: SelfReflect, SelfModify, DiaryWrite
+- **Vision**: Screenshot (cross-thread capture), AnalyzeImage (Venus API gemini-3-flash)
 - **Other**: Skill, MCP tools, Workflow, Monitor, PushNotification, Worktree, CtxInspect, SnipTool
 
 Each tool defines: `name`, `description`, `input_schema`, `is_read_only`, `concurrency_safe`, `execute()`.
@@ -112,7 +114,8 @@ CC-aligned v4 with four-category taxonomy (from CC's memoryTypes.ts):
 
 All PyQt6, frameless translucent windows:
 - `PetWindow` -- animated sprite, drag, context menu, idle/working/celebrating states
-- `ChatDialog` -- glass-morphism chat with streaming bubbles, tool call indicators, InterruptBubble (amber, centered), plan mode badge (blue), forced repaint via unpolish/polish/processEvents
+- `ChatDialog` -- glass-morphism chat with streaming bubbles, tool call indicators, InterruptBubble (amber, centered), plan mode badge (blue), multi-image [Image #N] chips, file [filename] chips, drag & drop, forced repaint via unpolish/polish/processEvents
+- `ScreenshotOverlay` -- full-screen region selection for Screenshot tool
 - `SettingsDialog` -- API key, provider, model selection
 - `PermissionDialog` -- tool permission prompts (allow/deny/always)
 - `SpeechBubble` -- floating text near pet
@@ -142,12 +145,30 @@ All PyQt6, frameless translucent windows:
 - **Abort**: `threading.Event`-based AbortSignal + 3s QTimer safety net (Python can't interrupt blocking `requests.post()` like JS AbortController)
 - **Cancel flow**: rollback to `_msg_count_at_query_start` (both conversation and UI checkpoint), then insert `[Request interrupted by user]` as InterruptBubble
 
+## Vision / Image Analysis
+
+Auto-selects strategy based on model capability:
+
+- **Vision-capable models** (Claude, GPT-4o): CC mode — images sent directly as content blocks in messages
+- **Non-vision models** (DeepSeek, hy3): Fallback — agent calls `AnalyzeImage` tool → Venus API `gemini-3-flash`
+
+Image input methods (all three insert `[Image #N]` or `[filename]` chips):
+- Upload button (📎) — file picker for images and documents
+- Ctrl+V — clipboard images or copied files from file manager
+- Drag & drop — files/images onto chat dialog
+
+File attachment (non-image): CC-aligned lazy load — stores path only, model uses `FileRead` tool on demand. Avoids bloating conversation context, enables prompt cache hits.
+
+Key files: `core/vision.py` (capture + base64), `tools/analyze_image_tool.py`, `tools/screenshot_tool.py`, `ui/screenshot_overlay.py`
+
 ## Configuration (`config.py`)
 
 - `DATA_DIR = ~/.claude-buddy/` -- all persistent data
 - `CONVERSATIONS_DIR`, `TASKS_FILE`, `INPUT_HISTORY_FILE`
 - UI constants: CLAUDE_ORANGE, CLAUDE_ORANGE_SHIMMER, BORDER_RADIUS
 - `GLOBAL_QSS` -- application-wide Qt stylesheet with `#sendBtn`, `#closeBtn` etc.
+- Vision config: `VISION_MODEL` (gemini-3-flash), `VISION_SECRET_ID/KEY`, `VISION_APP_GROUP_ID`
+- `VISION_CAPABLE_MODELS` / `VISION_CAPABLE_PROVIDERS` -- auto-detect if model supports image blocks
 
 ## Key Files by Size/Importance
 
@@ -162,6 +183,8 @@ All PyQt6, frameless translucent windows:
 | `ui/chat_dialog.py` (~40KB) | Chat window, streaming, tool bubbles |
 | `core/providers/anthropic_provider.py` | Anthropic API: thinking, effort, cache |
 | `core/providers/openai_provider.py` | OpenAI API: function calling format |
+| `core/providers/prompt_tool_provider.py` | PromptTool: system prompt injection, R1 reasoning handling |
+| `core/vision.py` | Screen capture + base64 encoding for Vision |
 | `core/tool_registry.py` | Tool registration, concurrency_safe marking |
 | `core/task_manager.py` | Task CRUD with dependencies, high water mark IDs |
 
