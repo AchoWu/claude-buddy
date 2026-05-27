@@ -19,6 +19,7 @@ Key patterns implemented:
 
 import time
 import hashlib
+import logging
 import threading
 import traceback
 import random
@@ -36,6 +37,8 @@ from core.normalization import normalize_messages
 from core.tool_summary import generate_tool_summary_async
 from prompts.system import build_system_prompt
 from config import MAX_TOOL_ROUNDS
+
+logger = logging.getLogger(__name__)
 
 
 # ── Error Classification ─────────────────────────────────────────────
@@ -209,6 +212,7 @@ class LLMEngine(QObject):
     cost_updated = pyqtSignal(str)        # cost summary string
     plan_mode_changed = pyqtSignal(bool)  # plan mode toggled
     ask_user = pyqtSignal(str, object, bool)  # question, options(list), multiSelect
+    screenshot_requested = pyqtSignal(str, str)  # (mode, prompt) — triggers main thread capture
 
     # ── Retry config (CC: withRetry.ts BASE_DELAY_MS=500, max 10 retries) ──
     MAX_RETRIES = 10
@@ -250,6 +254,13 @@ class LLMEngine(QObject):
         # CC-aligned: AskUser blocking mechanism
         self._ask_user_event = threading.Event()
         self._ask_user_answer: str = ""
+
+        # CC-aligned: Screenshot blocking mechanism (same pattern as AskUser)
+        self._screenshot_event = threading.Event()
+        self._screenshot_result: dict = {}  # {"type":"image_result", "data":..., "media_type":..., "text":...}
+
+        # Pending image for AnalyzeImage tool (set by send_message_with_image)
+        self._pending_image: dict | None = None  # {"data": base64, "media_type": "image/jpeg"}
 
         # Session tracking
         self._session_cost = SessionCost()
@@ -406,6 +417,16 @@ class LLMEngine(QObject):
         self._ask_user_answer = answer
         self._ask_user_event.set()
 
+    def resolve_screenshot(self, result: dict):
+        """Called from UI thread when screenshot capture completes.
+
+        Args:
+            result: dict with {"type":"image_result", "data": base64, "media_type":..., "text":...}
+                    or empty dict {} if cancelled.
+        """
+        self._screenshot_result = result
+        self._screenshot_event.set()
+
     @property
     def conversation(self) -> ConversationManager:
         return self._conversation
@@ -438,6 +459,193 @@ class LLMEngine(QObject):
         self._msg_count_at_query_start = len(self._conversation._messages)
         thread = threading.Thread(target=self._run_loop, daemon=True)
         thread.start()
+
+    def send_message_with_image(self, user_text: str, image_base64: str, media_type: str = "image/jpeg"):
+        """Single image convenience wrapper."""
+        self.send_message_with_images(user_text, [image_base64], media_type)
+
+    def send_message_with_images(self, user_text: str, images: list[str], media_type: str = "image/jpeg"):
+        """Send a user message with attached image(s).
+
+        Auto-selects strategy based on whether the current model supports vision:
+          - Vision-capable model (Claude, GPT-4o): CC mode — send images directly as content blocks
+          - Non-vision model (DeepSeek, hy3): Fallback — agent calls AnalyzeImage tool
+        """
+        if self._is_running:
+            self.error.emit("Already processing a message.")
+            return
+        if not self._provider:
+            self.error.emit("No AI provider configured. Open Settings to add an API key.")
+            return
+        if not images:
+            # No images — fall back to normal text message
+            self.send_message(user_text)
+            return
+
+        self._is_running = True
+        self._abort_signal.reset()
+        self._msg_count_before_send = len(self._conversation._messages)
+
+        if self._model_supports_vision():
+            # ── CC Mode: send images directly to conversation model ──
+            content_blocks = []
+            for img_b64 in images:
+                content_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": img_b64,
+                    },
+                })
+            content_blocks.append({
+                "type": "text",
+                "text": user_text or "Please describe and analyze these images.",
+            })
+            self._conversation.add_user_message_blocks(content_blocks)
+            self.state_changed.emit("work")
+            self._msg_count_at_query_start = len(self._conversation._messages)
+            thread = threading.Thread(target=self._run_loop, daemon=True)
+            thread.start()
+        else:
+            # ── Fallback Mode: store images, let agent call AnalyzeImage tool ──
+            # Store all images — AnalyzeImage will process them one by one or together
+            self._pending_image = {
+                "data": images[0],  # primary image for AnalyzeImage
+                "media_type": media_type,
+                "all_images": images,  # full list
+            }
+            display_text = user_text or "Please analyze these images."
+            n = len(images)
+            chips = ' '.join(f'[Image #{i+1}]' for i in range(n))
+            full_text = f"{chips} {display_text}"
+            self._conversation.add_user_message(full_text)
+            self.state_changed.emit("work")
+            self._msg_count_at_query_start = len(self._conversation._messages)
+            thread = threading.Thread(target=self._run_loop, daemon=True)
+            thread.start()
+
+    def _model_supports_vision(self) -> bool:
+        """Check if the current conversation model supports vision (image content blocks)."""
+        from config import VISION_CAPABLE_MODELS, VISION_CAPABLE_PROVIDERS
+        from core.settings import Settings
+
+        settings = Settings()
+        provider_name = settings.provider
+        model_name = settings.model
+
+        # Provider-level: all models from this provider support vision
+        if provider_name in VISION_CAPABLE_PROVIDERS:
+            return True
+
+        # Model-level: check specific model names
+        model_lower = model_name.lower()
+        for vm in VISION_CAPABLE_MODELS:
+            if vm.lower() in model_lower or model_lower in vm.lower():
+                return True
+
+        return False
+
+    def call_vision_model(self, prompt: str) -> str:
+        """Called by AnalyzeImage tool — sends pending image to Venus vision model.
+
+        Uses Venus API (v2.open.venus.oa.com) with gemini-3-flash model.
+        Auth via venus_api_base SDK (secret_id + secret_key).
+
+        Args:
+            prompt: The analysis prompt set by the main agent
+        Returns:
+            Text description from vision model
+        """
+        if not self._pending_image:
+            return "[No image available. User did not attach an image.]"
+
+        image_data = self._pending_image["data"]
+        media_type = self._pending_image.get("media_type", "image/jpeg")
+
+        from config import VISION_MODEL, VISION_SECRET_ID, VISION_SECRET_KEY, VISION_APP_GROUP_ID
+
+        try:
+            from venus_api_base.http_client import HttpClient
+            from venus_api_base.config import Config
+
+            client = HttpClient(
+                secret_id=VISION_SECRET_ID,
+                secret_key=VISION_SECRET_KEY,
+                config=Config(read_timeout=120),
+            )
+
+            domain = "http://v2.open.venus.oa.com"
+            header = {"Content-Type": "application/json"}
+
+            body = {
+                "appGroupId": VISION_APP_GROUP_ID,
+                "model": VISION_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are an AI assistant that helps people analyze images.",
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{image_data}",
+                                },
+                            },
+                        ],
+                    },
+                ],
+                "temperature": 0.2,
+                "top_p": 1,
+            }
+
+            # Retry up to 3 times
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    ret = client.post(
+                        f"{domain}/chat/single",
+                        header=header,
+                        body=_json.dumps(body),
+                    )
+
+                    if ret.get("code") != 0:
+                        err_msg = ret.get("message", "Unknown error")
+                        trace_id = ret.get("traceId", "")
+                        logger.warning("Vision Venus error (attempt %d): %s | TraceId: %s", attempt+1, err_msg, trace_id)
+                        if attempt < max_retries - 1:
+                            time.sleep(3)
+                            continue
+                        return f"[Vision model error: {err_msg}]"
+
+                    if ret.get("data", {}).get("status") != 2:
+                        logger.warning("Vision processing incomplete (attempt %d)", attempt+1)
+                        if attempt < max_retries - 1:
+                            time.sleep(3)
+                            continue
+                        return "[Vision model: processing incomplete]"
+
+                    result = ret["data"]["response"]
+                    # Clear pending image after successful analysis
+                    self._pending_image = None
+                    return result
+
+                except Exception as retry_err:
+                    logger.warning("Vision request error (attempt %d): %s", attempt+1, retry_err)
+                    if attempt < max_retries - 1:
+                        time.sleep(3)
+                        continue
+                    return f"[Vision model error: {retry_err}]"
+
+        except ImportError:
+            return "[Vision model error: venus_api_base not installed. Run: pip install venus_api_base]"
+        except Exception as e:
+            logger.error("Vision error: %s", e, exc_info=True)
+            return f"[Vision model error: {e}]"
 
     def send_prompt(self, prompt: str, display_text: str = ""):
         """Send a prompt to the LLM without adding it as a visible user message.
@@ -1395,6 +1603,29 @@ class LLMEngine(QObject):
                 output_str = self._ask_user_answer or "[No answer provided]"
             self.tool_result.emit(tc.name, output_str[:300])
             return {"output": output_str}
+
+        # ── Screenshot special handling: block engine, wait for main thread capture ──
+        if tc.name == "Screenshot":
+            mode = tc.input.get("mode", "active_window")
+            prompt = tc.input.get("prompt", "Describe what you see in the screenshot")
+
+            self._screenshot_event.clear()
+            self._screenshot_result = {}
+            self.screenshot_requested.emit(mode, prompt)
+
+            # Block until main thread completes capture (30s timeout)
+            from config import SCREENSHOT_TIMEOUT_SEC
+            captured = self._screenshot_event.wait(timeout=SCREENSHOT_TIMEOUT_SEC)
+
+            if self._abort_signal.aborted:
+                return {"output": "Operation cancelled by user.", "is_error": True}
+            if not captured or not self._screenshot_result:
+                self.tool_result.emit(tc.name, "Screenshot cancelled or timed out")
+                return {"output": "Screenshot was cancelled or timed out.", "is_error": True}
+
+            # Return structured image result (format_tool_results will create image block)
+            self.tool_result.emit(tc.name, f"[Screenshot captured ({self._screenshot_result.get('media_type', 'image/jpeg')})]")
+            return {"output": self._screenshot_result}
 
         # Execute
         try:

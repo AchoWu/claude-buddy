@@ -170,6 +170,27 @@ class ConversationManager:
         self._enforce_limit()
         self._dirty = True
 
+    def add_user_message_blocks(self, content_blocks: list[dict]):
+        """Add a user message with structured content blocks (text + image).
+        Used for Vision/multimodal messages.
+        """
+        msg = {"role": "user", "content": content_blocks, "timestamp": time.time()}
+        self._messages.append(msg)
+        # Estimate tokens: text blocks + rough image estimate
+        tokens = 0
+        for block in content_blocks:
+            if block.get("type") == "text":
+                tokens += self._estimate_msg_tokens(block.get("text", ""))
+            elif block.get("type") == "image":
+                # Rough estimate: base64 image ~ 0.125 tokens per char
+                data = block.get("source", {}).get("data", "")
+                tokens += int(len(data) * 0.125)
+        self._token_estimate += tokens
+        self._message_timestamps.append(time.time())
+        self._update_adaptive_offset()
+        self._enforce_limit()
+        self._dirty = True
+
     def add_assistant_message(self, content: Any):
         msg = {"role": "assistant", "content": content, "timestamp": time.time()}
         self._messages.append(msg)

@@ -76,6 +76,7 @@ class FileReadTool(BaseTool):
 
     def __init__(self):
         self._file_read_state = None  # injected by ToolRegistry
+        self._engine = None  # injected by ToolRegistry (for pending_image)
 
     def execute(self, input_data: dict) -> str:
         file_path = Path(input_data["file_path"])
@@ -199,6 +200,14 @@ class FileReadTool(BaseTool):
 
                 if self._file_read_state:
                     self._file_read_state.record_read(str(file_path), mtime=file_path.stat().st_mtime)
+
+                # Store image as pending for AnalyzeImage tool
+                if self._engine and hasattr(self._engine, '_pending_image'):
+                    media_type = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+                    self._engine._pending_image = {
+                        "data": b64,
+                        "media_type": media_type,
+                    }
 
                 return (
                     f"(Image: {fmt} {width}x{height}, {raw_size:,} bytes{compressed_info})\n"

@@ -307,13 +307,42 @@ class AnthropicProvider(BaseProvider):
         ]
 
     def format_tool_results(self, tool_calls: list[ToolCall], results: list[dict]) -> dict:
-        """Format as Anthropic tool_result content blocks."""
+        """Format as Anthropic tool_result content blocks.
+        CC-aligned: supports structured image results (image content block in tool_result).
+        """
         content = []
         for tc, result in zip(tool_calls, results):
-            content.append({
-                "type": "tool_result",
-                "tool_use_id": tc.id,
-                "content": result.get("output", ""),
-                **({"is_error": True} if result.get("is_error") else {}),
-            })
+            output = result.get("output", "")
+
+            # CC-aligned: structured image result → image content block
+            if isinstance(output, dict) and output.get("type") == "image_result":
+                blocks = []
+                # Image block
+                if output.get("data"):
+                    blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": output.get("media_type", "image/jpeg"),
+                            "data": output["data"],
+                        },
+                    })
+                # Text block (the analysis prompt)
+                text = output.get("text", "")
+                if text:
+                    blocks.append({"type": "text", "text": text})
+
+                content.append({
+                    "type": "tool_result",
+                    "tool_use_id": tc.id,
+                    "content": blocks if blocks else "Screenshot captured but no data available.",
+                })
+            else:
+                # Normal text result (existing logic)
+                content.append({
+                    "type": "tool_result",
+                    "tool_use_id": tc.id,
+                    "content": str(output) if output else "",
+                    **({"is_error": True} if result.get("is_error") else {}),
+                })
         return {"role": "user", "content": content}

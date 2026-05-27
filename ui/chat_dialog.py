@@ -2,10 +2,12 @@
 Chat Dialog — full conversation window with translucent glass-morphism design.
 """
 
+import re
+import logging
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QSize, QRectF
 from PyQt6.QtGui import (
     QFont, QColor, QKeyEvent, QPainter, QPainterPath,
-    QLinearGradient, QBrush, QPen,
+    QLinearGradient, QBrush, QPen, QPixmap, QPolygon, QIcon,
 )
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
@@ -17,6 +19,8 @@ from config import (
     CLAUDE_ORANGE, CLAUDE_ORANGE_SHIMMER, BORDER_RADIUS,
     SUCCESS_GREEN, ERROR_RED,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Keys checked (in order) when summarizing a tool-call's input for the bubble.
@@ -95,7 +99,6 @@ class _MarkdownRenderer:
     @staticmethod
     def _is_table_separator(line: str) -> bool:
         """Check if line is a GFM table separator (e.g. |---|:---:|---:| )."""
-        import re
         stripped = line.strip()
         if not stripped.startswith('|') and '|' not in stripped:
             return False
@@ -111,7 +114,6 @@ class _MarkdownRenderer:
     @staticmethod
     def _parse_table_align(sep_line: str) -> list:
         """Parse alignment from separator row. Returns list of 'left'/'center'/'right'."""
-        import re
         cells = [c.strip() for c in sep_line.strip().strip('|').split('|')]
         aligns = []
         for c in cells:
@@ -126,7 +128,6 @@ class _MarkdownRenderer:
     @staticmethod
     def to_html(md: str) -> str:
         """Convert markdown text to HTML suitable for QLabel rendering."""
-        import re
         lines = md.split('\n')
         html_lines = []
         in_code_block = False
@@ -295,7 +296,6 @@ class _MarkdownRenderer:
     @staticmethod
     def _inline(text: str) -> str:
         """Handle inline markdown: bold, italic, code, links, strikethrough."""
-        import re
         # Inline code (must be first to prevent inner processing)
         text = re.sub(
             r'`([^`]+)`',
@@ -936,6 +936,7 @@ class ChatDialog(QWidget):
     """Full conversation dialog with translucent glass-morphism design."""
 
     message_sent = pyqtSignal(str)   # user typed a message
+    image_message_sent = pyqtSignal(str, list)  # (text, [base64_images]) — user sent message with image(s)
     abort_requested = pyqtSignal()   # user clicked stop during thinking
     open_settings = pyqtSignal()     # user clicked settings button
     clear_requested = pyqtSignal()   # user clicked clear history button
@@ -1168,7 +1169,56 @@ class ChatDialog(QWidget):
         """)
         self._input.setFixedHeight(36)
         self._input.returnPressed.connect(self._on_send)
+        # Install event filter to intercept Ctrl+V for image paste on the input
+        self._input.installEventFilter(self)
+        # Watch for text changes — if user deletes [Image attached], cancel the image
+        self._input.textChanged.connect(self._on_input_text_changed)
         input_layout.addWidget(self._input)
+
+        # Attach image button (mountain + sun icon — clean image upload look)
+        self._attach_btn = QPushButton()
+        self._attach_btn.setFixedSize(36, 36)
+        self._attach_btn.setToolTip("Upload image (Ctrl+V to paste)")
+        self._attach_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(255,255,255,10);
+                border: 1px solid rgba(255,255,255,20);
+                border-radius: 18px;
+                color: rgba(255,255,255,150);
+            }}
+            QPushButton:hover {{
+                background: rgba(215,119,87,40);
+                border: 1px solid rgba(215,119,87,80);
+                color: white;
+            }}
+        """)
+        # Draw a small image icon (mountain + sun) via QPixmap
+        from PyQt6.QtCore import QPoint as QP
+        icon_px = QPixmap(20, 20)
+        icon_px.fill(QColor(0, 0, 0, 0))
+        p = QPainter(icon_px)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(200, 200, 200), 1.5)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Rounded rect frame
+        p.drawRoundedRect(2, 2, 16, 16, 3, 3)
+        # Sun (small circle)
+        p.setBrush(QColor(200, 200, 200))
+        p.drawEllipse(12, 4, 4, 4)
+        # Mountain (triangle)
+        p.setBrush(QColor(200, 200, 200))
+        p.setPen(Qt.PenStyle.NoPen)
+        mountain = QPolygon([QP(3, 15), QP(8, 8), QP(13, 15)])
+        p.drawPolygon(mountain)
+        # Small hill
+        mountain2 = QPolygon([QP(10, 15), QP(14, 10), QP(17, 15)])
+        p.drawPolygon(mountain2)
+        p.end()
+        self._attach_btn.setIcon(QIcon(icon_px))
+        self._attach_btn.setIconSize(icon_px.size())
+        self._attach_btn.clicked.connect(self._on_attach_image)
+        input_layout.addWidget(self._attach_btn)
 
         self._send_btn = QPushButton(">")
         self._send_btn.setObjectName("sendBtn")
@@ -1177,6 +1227,8 @@ class ChatDialog(QWidget):
         input_layout.addWidget(self._send_btn)
 
         self._is_thinking = False
+        self._pending_images: list[str] = []  # list of base64 images waiting to be sent
+        self._image_counter: int = 0          # for [Image #N] chip IDs
 
         container_layout.addWidget(input_frame)
 
@@ -1199,7 +1251,6 @@ class ChatDialog(QWidget):
         if not messages:
             return
 
-        import re
         import json as _json
         has_any = False
         for msg in messages:
@@ -1258,7 +1309,9 @@ class ChatDialog(QWidget):
                 content = "\n".join(text_parts) if text_parts else ""
 
             # ── OpenAI-style tool_calls field on assistant messages ──
-            # (saved as {"role":"assistant", "content":"", "tool_calls":[...]})
+            # (saved as {"role":"assistant", "content":"text", "tool_calls":[...]})
+            # Collect tool_calls but render AFTER text (to match real-time order)
+            oai_tool_calls_to_render = []
             if role == "assistant":
                 oai_tool_calls = msg.get("tool_calls") or []
                 for tc in oai_tool_calls:
@@ -1272,10 +1325,13 @@ class ChatDialog(QWidget):
                     except (_json.JSONDecodeError, TypeError):
                         inp = {}
                     summary = _summarize_tool_input(inp) if isinstance(inp, dict) else str(inp)
-                    self.add_tool_call(name, summary[:120])
-                    has_any = True
+                    oai_tool_calls_to_render.append((name, summary[:120]))
 
             if not isinstance(content, str) or not content.strip():
+                # No text content — render tool calls here
+                for name, summary in oai_tool_calls_to_render:
+                    self.add_tool_call(name, summary)
+                    has_any = True
                 continue
 
             text = content.strip()
@@ -1317,6 +1373,11 @@ class ChatDialog(QWidget):
                     else:
                         if part:
                             self.add_assistant_message(part, timestamp=ts)
+
+                # Render OpenAI tool_calls AFTER assistant text (matches real-time order)
+                for name, summary in oai_tool_calls_to_render:
+                    self.add_tool_call(name, summary)
+                    has_any = True
 
         # Done loading — scroll to bottom once, then re-enable auto-scroll
         self._loading_history = False
@@ -1560,18 +1621,134 @@ class ChatDialog(QWidget):
 
     def _on_send(self):
         text = self._input.text().strip()
-        if not text:
+        if not text and not self._pending_images:
             return
+
+        # If chips exist but images haven't loaded yet, wait briefly and retry
+        chip_count = len(re.findall(r'\[Image #\d+\]', text))
+        if chip_count > 0 and len(self._pending_images) < chip_count:
+            logger.debug("ImageSend waiting: %d chips, %d images loaded", chip_count, len(self._pending_images))
+            QTimer.singleShot(300, self._on_send)
+            return
+
+        logger.debug("ImageSend: pending_images=%d, chip_count=%d, text='%s'", len(self._pending_images), chip_count, text[:50])
         # Record to input history + persist
-        if not self._input_history or self._input_history[-1] != text:
+        if text and (not self._input_history or self._input_history[-1] != text):
             self._input_history.append(text)
             self._save_input_history()
         self._history_index = -1
         self._saved_input = ""
 
+        # Save pending images BEFORE clearing input (clear triggers textChanged which would wipe them)
+        images_to_send = list(self._pending_images)
+        image_count = self._image_counter
+
+        # Block signals during clear to prevent _on_input_text_changed from wiping images
+        self._input.blockSignals(True)
         self._input.clear()
-        self.add_user_message(text)
-        self.message_sent.emit(text)
+        self._input.blockSignals(False)
+
+        # If there are pending images, send as image message
+        if images_to_send:
+            # Strip all [Image #N] tags from user's actual question
+            user_text = re.sub(r'\[Image #\d+\]\s*', '', text).strip()
+            display_text = user_text or "Please analyze this image."
+            n = len(images_to_send)
+            chips = ' '.join(f'[Image #{i+1}]' for i in range(n))
+            self.add_user_message(f"{chips} {display_text}")
+            self.image_message_sent.emit(display_text, images_to_send)
+            self._pending_images = []
+            self._image_counter = 0
+            self._clear_image_preview()
+        else:
+            self.add_user_message(text)
+            self.message_sent.emit(text)
+
+    def _on_attach_image(self):
+        """Open file dialog to select an image."""
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Image", "",
+            "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All Files (*)"
+        )
+        if path:
+            # Show tag immediately, load async
+            self._input.setText("[Image attached] ")
+            self._input.setCursorPosition(len(self._input.text()))
+            QTimer.singleShot(0, lambda: self._async_load_file(path))
+
+    def _update_input_style_for_images(self):
+        """Highlight input border orange when images are attached."""
+        self._input.setStyleSheet(f"""
+            QLineEdit {{
+                background: rgba(255,255,255,8);
+                border: 2px solid rgba(215,119,87,180);
+                border-radius: 18px;
+                padding: 8px 16px;
+                color: {TEXT_PRIMARY};
+                font-size: 13px;
+                selection-background-color: {CLAUDE_ORANGE};
+            }}
+            QLineEdit::placeholder {{
+                color: rgba(215,119,87,150);
+            }}
+        """)
+
+    def _clear_image_preview(self):
+        """Reset input border to normal (no images attached)."""
+        self._input.setStyleSheet(f"""
+            QLineEdit {{
+                background: rgba(255,255,255,8);
+                border: 1px solid rgba(255,255,255,20);
+                border-radius: 18px;
+                padding: 8px 16px;
+                color: {TEXT_PRIMARY};
+                font-size: 13px;
+                selection-background-color: {CLAUDE_ORANGE};
+            }}
+            QLineEdit:focus {{
+                border: 1px solid rgba(215,119,87,120);
+            }}
+            QLineEdit::placeholder {{
+                color: rgba(255,255,255,40);
+            }}
+        """)
+
+    def _on_input_text_changed(self, text: str):
+        """Sync pending images with [Image #N] chips in input text (CC-aligned).
+        If user deletes a chip, the corresponding image is removed."""
+        # Find all [Image #N] chips currently in text
+        current_chips = set(int(m) for m in re.findall(r'\[Image #(\d+)\]', text))
+        expected_chips = set(range(1, self._image_counter + 1))
+
+        # If chips were removed, prune images
+        removed = expected_chips - current_chips
+        if removed and self._pending_images:
+            # Remove images from highest index down (to keep indices stable)
+            for idx in sorted(removed, reverse=True):
+                img_idx = idx - 1  # [Image #1] -> index 0
+                if 0 <= img_idx < len(self._pending_images):
+                    self._pending_images.pop(img_idx)
+
+            # Renumber remaining chips and reset counter
+            if self._pending_images:
+                new_counter = len(self._pending_images)
+                cleaned = re.sub(r'\[Image #\d+\]\s*', '', text)
+                chips_text = ''.join(f'[Image #{i+1}] ' for i in range(new_counter))
+                self._input.blockSignals(True)
+                self._input.setText(chips_text + cleaned.strip() + (' ' if cleaned.strip() else ''))
+                self._input.setCursorPosition(len(self._input.text()))
+                self._input.blockSignals(False)
+                self._image_counter = new_counter
+            else:
+                self._image_counter = 0
+                self._clear_image_preview()
+
+        # Update input style
+        if self._pending_images or current_chips:
+            self._update_input_style_for_images()
+        elif not current_chips and not self._pending_images:
+            self._clear_image_preview()
 
     def _load_input_history(self):
         """Load input history from disk on startup."""
@@ -1599,16 +1776,105 @@ class ChatDialog(QWidget):
             pass
 
     def eventFilter(self, obj, event):
-        """Intercept ↑/↓ on the input box for shell-like history navigation."""
+        """Intercept Ctrl+V for image paste + ↑/↓ for history navigation."""
         if obj is self._input and event.type() == event.Type.KeyPress:
             key = event.key()
-            if key == Qt.Key.Key_Up:
+            # Ctrl+V: try image paste first
+            if (key == Qt.Key.Key_V and
+                    event.modifiers() == Qt.KeyboardModifier.ControlModifier):
+                if self._try_paste_image():
+                    return True  # consumed — don't let QLineEdit paste text
+            # ↑/↓: history navigation
+            elif key == Qt.Key.Key_Up:
                 self._history_navigate(-1)
-                return True   # consumed
+                return True
             elif key == Qt.Key.Key_Down:
                 self._history_navigate(+1)
                 return True
         return super().eventFilter(obj, event)
+
+    def _try_paste_image(self) -> bool:
+        """Quick check if clipboard has image, show chip immediately, load async."""
+        from PyQt6.QtWidgets import QApplication
+
+        clipboard = QApplication.clipboard()
+        mime = clipboard.mimeData()
+
+        # Fast check: does clipboard contain image data?
+        has_image = mime and mime.hasImage()
+
+        if not has_image:
+            # Check for image file URLs
+            if mime and mime.hasUrls():
+                for url in mime.urls():
+                    path = url.toLocalFile()
+                    if path and any(path.lower().endswith(ext) for ext in
+                                   ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')):
+                        self._insert_image_chip()
+                        QTimer.singleShot(0, lambda p=path: self._async_load_file(p))
+                        return True
+            return False
+
+        # Has image — insert chip at cursor
+        self._insert_image_chip()
+        QTimer.singleShot(0, self._async_load_clipboard)
+        return True
+
+    def _insert_image_chip(self):
+        """Insert [Image #N] chip at cursor position in input."""
+        self._image_counter += 1
+        chip = f"[Image #{self._image_counter}] "
+        # Insert at current cursor position
+        pos = self._input.cursorPosition()
+        current = self._input.text()
+        new_text = current[:pos] + chip + current[pos:]
+        self._input.setText(new_text)
+        self._input.setCursorPosition(pos + len(chip))
+        # Update input border to indicate images attached
+        self._update_input_style_for_images()
+
+    def _async_load_clipboard(self):
+        """Deferred: read pixmap from clipboard, compress, append to pending list."""
+        from PyQt6.QtWidgets import QApplication
+        from core.vision import ScreenCapture
+
+        clipboard = QApplication.clipboard()
+        pixmap = clipboard.pixmap()
+        if pixmap and not pixmap.isNull():
+            b64 = ScreenCapture.pixmap_to_base64(pixmap)
+            if b64:
+                self._pending_images.append(b64)
+                logger.debug("Clipboard image loaded: %d chars, total=%d", len(b64), len(self._pending_images))
+                return
+
+        logger.debug("Clipboard image load failed: pixmap=%s", 'null' if not pixmap or pixmap.isNull() else 'ok')
+        # Failed — remove the last chip
+        self._remove_last_chip()
+
+    def _async_load_file(self, path: str):
+        """Deferred: load image from file path, compress, append to pending list."""
+        from core.vision import ScreenCapture
+
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            self._remove_last_chip()
+            return
+
+        b64 = ScreenCapture.pixmap_to_base64(pixmap)
+        if b64:
+            self._pending_images.append(b64)
+        else:
+            self._remove_last_chip()
+
+    def _remove_last_chip(self):
+        """Remove the last [Image #N] chip on load failure."""
+        current = self._input.text()
+        # Remove the last [Image #N] occurrence
+        new_text = re.sub(r'\[Image #' + str(self._image_counter) + r'\]\s*', '', current)
+        self._input.setText(new_text)
+        self._image_counter -= 1
+        if not self._pending_images:
+            self._clear_image_preview()
 
     def _history_navigate(self, direction: int):
         """Navigate input history. direction: -1 = older, +1 = newer."""
@@ -1744,6 +2010,11 @@ class ChatDialog(QWidget):
         self.setGeometry(geo)
 
     def keyPressEvent(self, event: QKeyEvent):
+        # Ctrl+V: try to paste image (when focus is NOT on input)
+        if (event.key() == Qt.Key.Key_V and
+                event.modifiers() == Qt.KeyboardModifier.ControlModifier):
+            if self._try_paste_image():
+                return
         if event.key() == Qt.Key.Key_Escape:
             self.hide()
         else:

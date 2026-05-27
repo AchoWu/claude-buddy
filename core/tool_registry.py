@@ -91,6 +91,14 @@ def _get_extra_tools():
     from tools.extra_tools import BriefTool, PowerShellTool, TodoWriteTool, ToolSearchTool
     return BriefTool, PowerShellTool, TodoWriteTool, ToolSearchTool
 
+def _get_screenshot_tool():
+    from tools.screenshot_tool import ScreenshotTool
+    return ScreenshotTool
+
+def _get_analyze_image_tool():
+    from tools.analyze_image_tool import AnalyzeImageTool
+    return AnalyzeImageTool
+
 # Eagerly import PlanModeState and AgentRegistry (needed at init time)
 from tools.plan_mode_tool import PlanModeState
 from tools.send_message_tool import AgentRegistry
@@ -137,6 +145,8 @@ class ToolRegistry:
             file_read._file_read_state = self._file_read_state
             file_write._file_read_state = self._file_read_state
             file_edit._file_read_state = self._file_read_state
+        # Inject engine for pending_image (AnalyzeImage tool integration)
+        file_read._engine = self._engine
         self._tools[file_read.name] = file_read
         self._tools[file_write.name] = file_write
         self._tools[file_edit.name] = file_edit
@@ -320,9 +330,21 @@ class ToolRegistry:
         # ── Round 2: WebBrowserTool (optional — playwright) ──────
         try:
             from tools.web_browser_tool import WebBrowserTool
-            self._tools[WebBrowserTool().name] = WebBrowserTool()
+            web_browser = WebBrowserTool()
+            self._tools[web_browser.name] = web_browser
         except Exception:
             pass  # playwright not installed
+
+        # ── Screenshot tool (deferred, cross-thread like AskUser) ────
+        ScreenshotTool = _get_screenshot_tool()
+        screenshot = ScreenshotTool()
+        self._tools[screenshot.name] = screenshot
+
+        # ── AnalyzeImage tool: inject engine (deferred) ──────────────
+        AnalyzeImageTool = _get_analyze_image_tool()
+        analyze_img = AnalyzeImageTool()
+        analyze_img._engine = self._engine
+        self._tools[analyze_img.name] = analyze_img
 
         # ── CC-aligned: mark concurrency-safe tools ──────────────
         # CC: isConcurrencySafe() — read-only tools with no side effects

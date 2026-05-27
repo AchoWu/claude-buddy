@@ -65,6 +65,13 @@ _TOOL_CALL_RE = re.compile(
     re.DOTALL,
 )
 
+# Regex to strip <think>...</think> blocks (DeepSeek-R1 reasoning chain)
+# Only used as fallback when reasoning_content field is not present.
+_THINK_RE = re.compile(
+    r'^<think>\s*.*?\s*</think>',
+    re.DOTALL,
+)
+
 
 class PromptToolProvider(BaseProvider):
     """
@@ -131,6 +138,18 @@ class PromptToolProvider(BaseProvider):
                 "output_tokens": response.usage.completion_tokens or 0,
             }
 
+        # Extract reasoning/thinking content (DeepSeek-R1: separate field, not in content)
+        thinking_content = ""
+        msg = response.choices[0].message
+        # R1 returns reasoning in reasoning_content field (not <think> tags)
+        if hasattr(msg, "reasoning_content") and msg.reasoning_content:
+            thinking_content = msg.reasoning_content
+        # Fallback: some proxies embed <think> at the start of content
+        elif full_text.lstrip().startswith("<think>") and _THINK_RE.search(full_text):
+            think_matches = list(_THINK_RE.finditer(full_text))
+            thinking_content = "\n".join(m.group(0) for m in think_matches)
+            full_text = _THINK_RE.sub("", full_text).strip()
+
         # Parse tool calls from the text
         tool_calls = self._parse_tool_calls(full_text)
 
@@ -138,6 +157,8 @@ class PromptToolProvider(BaseProvider):
         display_text = _TOOL_CALL_RE.sub("", full_text).strip()
 
         raw_content = {"role": "assistant", "content": full_text}
+        if thinking_content:
+            raw_content["_thinking"] = thinking_content
         if usage:
             raw_content["_usage"] = usage
         return raw_content, tool_calls, display_text
@@ -153,7 +174,10 @@ class PromptToolProvider(BaseProvider):
         tools: list[dict],
         max_tokens: int = 4096,
     ):
-        """Real streaming: yield text deltas as they arrive from the API."""
+        """Real streaming: yield text deltas as they arrive from the API.
+        Handles DeepSeek-R1 reasoning_content (separate field, not shown to user).
+        Falls back to <think> tag filtering for proxies that embed it in content.
+        """
         from core.providers.base import StreamChunk
 
         enhanced_system = system
@@ -174,9 +198,13 @@ class PromptToolProvider(BaseProvider):
         )
 
         full_text = ""
+        thinking_parts = []
         usage = None
+        in_think_tag = False  # fallback: tracking <think> tags in content
+        first_content_chunk = True  # only detect <think> at the very start
+
         for chunk in stream:
-            # Capture usage from chunks — only keep non-zero values
+            # Capture usage from chunks
             if hasattr(chunk, 'usage') and chunk.usage:
                 u = chunk.usage
                 if (u.prompt_tokens and u.prompt_tokens > 0) or \
@@ -188,16 +216,51 @@ class PromptToolProvider(BaseProvider):
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
+
+            # R1: reasoning_content comes in a separate delta field — collect but don't show
+            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                thinking_parts.append(delta.reasoning_content)
+                continue
+
+            # Normal content
             if delta and delta.content:
-                full_text += delta.content
-                yield StreamChunk(type="text_delta", text=delta.content)
+                text = delta.content
+                full_text += text
+
+                # Fallback: only detect <think> at the start of response
+                if not in_think_tag:
+                    if first_content_chunk and "<think>" in text:
+                        before = text.split("<think>")[0]
+                        if before.strip():
+                            yield StreamChunk(type="text_delta", text=before)
+                        in_think_tag = True
+                    else:
+                        yield StreamChunk(type="text_delta", text=text)
+                    first_content_chunk = False
+                else:
+                    if "</think>" in text:
+                        in_think_tag = False
+                        after = text.split("</think>", 1)[-1]
+                        if after.strip():
+                            yield StreamChunk(type="text_delta", text=after)
 
         yield StreamChunk(type="done")
+
+        # Collect thinking content
+        thinking_content = "".join(thinking_parts)
+
+        # Fallback: strip <think> from content only if it appears at the start
+        if not thinking_content and full_text.lstrip().startswith("<think>") and _THINK_RE.search(full_text):
+            think_matches = list(_THINK_RE.finditer(full_text))
+            thinking_content = "\n".join(m.group(0) for m in think_matches)
+            full_text = _THINK_RE.sub("", full_text).strip()
 
         # Parse tool calls from the accumulated text
         tool_calls = self._parse_tool_calls(full_text)
         display_text = _TOOL_CALL_RE.sub("", full_text).strip()
         raw_content = {"role": "assistant", "content": full_text}
+        if thinking_content:
+            raw_content["_thinking"] = thinking_content
         if usage:
             raw_content["_usage"] = usage
         return raw_content, tool_calls, display_text

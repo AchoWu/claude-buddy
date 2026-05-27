@@ -46,6 +46,32 @@ BUBBLE_FADE_SEC = 3  # fade-out at the end
 NOTIFICATION_SHOW_SEC = 8
 MAX_TOOL_ROUNDS = 200  # prevent infinite tool loops
 
+# ── Screenshot / Vision ─────────────────────────────────────────────
+SCREENSHOT_MAX_SIZE = 1920       # max pixel dimension before downscale
+SCREENSHOT_QUALITY = 85          # JPEG quality (1-100)
+SCREENSHOT_TIMEOUT_SEC = 30      # timeout for region selection (seconds)
+
+# ── Vision Model (Venus API — gemini-3-flash) ──────────────────────
+VISION_MODEL = "gemini-3-flash"
+VISION_SECRET_ID = "F2ytn7ejM5gn1qY2FaHLcd0k"
+VISION_SECRET_KEY = "YjgBOrrIT0S5vqfppwf7ek7G"
+VISION_APP_GROUP_ID = 3892
+
+# Models/providers that natively support vision (image content blocks)
+# If the current model is in this set → CC mode (send image directly)
+# Otherwise → fallback mode (call dedicated vision model first)
+VISION_CAPABLE_MODELS = {
+    # Anthropic Claude (all recent models support vision)
+    "claude-sonnet-4-20250514", "claude-sonnet-4",
+    "claude-opus-4-20250514", "claude-opus-4",
+    "claude-haiku-3.5",
+    # OpenAI
+    "gpt-4o", "gpt-4o-mini", "gpt-4-turbo",
+    # Hunyuan vision
+    "hunyuan-turbos-vision-latest",
+}
+VISION_CAPABLE_PROVIDERS = {"anthropic"}  # all models from these providers support vision
+
 # ── Default Model Config ─────────────────────────────────────────────────
 DEFAULT_PROVIDER = "taiji"
 DEFAULT_MODEL = "DeepSeek-V3_1-Online-32k"

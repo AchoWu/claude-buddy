@@ -5,9 +5,12 @@ Entry point: launch QApplication, create pet window, connect all components.
 
 import sys
 import os
+import logging
 import random
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QPoint, QTimer
+
+logger = logging.getLogger(__name__)
 
 from config import APP_NAME, GLOBAL_QSS, PET_SIZE, DATA_DIR
 from ui.pet_window import PetWindow, PetState
@@ -55,6 +58,7 @@ class BuddyApp:
             lambda: self.pet.set_pet_state(PetState.IDLE)
         )
         self.context_menu.quit_requested.connect(self._quit)
+        self.context_menu.screenshot_requested.connect(self._on_screenshot_from_menu)
 
         # ── System tray ──────────────────────────────────────────────
         self.tray = SystemTray(character=self.settings.character)
@@ -157,6 +161,14 @@ class BuddyApp:
         self.engine.error.connect(self._on_engine_error)
         self.engine.plan_mode_changed.connect(self._on_plan_mode_changed)
         self.engine.ask_user.connect(self._on_ask_user)
+        self.engine.screenshot_requested.connect(self._on_screenshot_requested)
+
+        # ── Screenshot overlay ───────────────────────────────────────
+        from ui.screenshot_overlay import ScreenshotOverlay
+        self._screenshot_overlay = ScreenshotOverlay()
+        self._screenshot_overlay.region_selected.connect(self._on_region_captured)
+        self._screenshot_overlay.cancelled.connect(self._on_screenshot_cancelled)
+        self._pending_screenshot_prompt: str = ""
 
         # Initialize provider
         self._refresh_provider()
@@ -258,15 +270,97 @@ class BuddyApp:
                 # Fallback: no chat open, resolve immediately
                 self.engine.resolve_ask_user("[Chat not open]")
         except Exception as e:
-            print(f"[AskUser] Inline bubble error: {e}")
-            import traceback; traceback.print_exc()
+            logger.error("AskUser inline bubble error: %s", e, exc_info=True)
             self.engine.resolve_ask_user(f"[Error: {e}]")
+
+    # ── Screenshot handlers ──────────────────────────────────────────
+    def _on_screenshot_requested(self, mode: str, prompt: str):
+        """Engine requests a screenshot — execute capture on main thread."""
+        from core.vision import ScreenCapture
+
+        self._pending_screenshot_prompt = prompt
+
+        if mode == "region":
+            # Show overlay for user to select area
+            self._screenshot_overlay.start_selection()
+            return  # will continue in _on_region_captured
+
+        # Immediate capture (no user interaction needed)
+        if mode == "active_window":
+            pixmap = ScreenCapture.capture_active_window()
+        else:  # "full"
+            pixmap = ScreenCapture.capture_full_screen()
+
+        self._complete_screenshot(pixmap)
+
+    def _on_region_captured(self, rect):
+        """User finished drawing a region in the overlay."""
+        from core.vision import ScreenCapture
+        pixmap = ScreenCapture.capture_region(rect)
+        self._complete_screenshot(pixmap)
+
+    def _on_screenshot_cancelled(self):
+        """User pressed ESC or right-clicked in the overlay."""
+        self.engine.resolve_screenshot({})  # empty dict signals cancellation
+
+    def _on_screenshot_from_menu(self):
+        """User triggered screenshot from context menu — capture active window and send via Vision pipeline."""
+        from core.vision import ScreenCapture
+        pixmap = ScreenCapture.capture_active_window()
+        if pixmap.isNull():
+            self.show_bubble("Screenshot failed!")
+            return
+        b64 = ScreenCapture.pixmap_to_base64(pixmap)
+        if not b64:
+            self.show_bubble("Screenshot encoding failed!")
+            return
+        # Open chat and send image through the proper Vision pipeline
+        self._open_chat()
+        prompt = "请分析这个截图的内容，告诉我你看到了什么。"
+        if self._chat_dialog:
+            self._chat_dialog.set_thinking(True)
+            self._chat_dialog.save_checkpoint()
+            self._chat_dialog.add_user_message(f"[Screenshot] {prompt}")
+        self.pet.set_pet_state(PetState.WORKING)
+        self.engine.send_message_with_image(prompt, b64)
+
+    def _complete_screenshot(self, pixmap):
+        """Compress screenshot, encode base64, and resolve the engine's wait."""
+        from core.vision import ScreenCapture
+        from PyQt6.QtGui import QPixmap
+
+        if pixmap.isNull():
+            self.engine.resolve_screenshot({})
+            return
+
+        b64 = ScreenCapture.pixmap_to_base64(pixmap)
+        if not b64:
+            self.engine.resolve_screenshot({})
+            return
+
+        # Optionally show thumbnail in chat
+        if self._chat_dialog:
+            self._chat_dialog.add_tool_call(
+                "Screenshot",
+                f"Captured ({pixmap.width()}×{pixmap.height()}, "
+                f"~{ScreenCapture.estimate_tokens(b64):,} tokens)"
+            )
+
+        # Construct CC-aligned structured image result
+        result = {
+            "type": "image_result",
+            "data": b64,
+            "media_type": "image/jpeg",
+            "text": self._pending_screenshot_prompt,
+        }
+        self.engine.resolve_screenshot(result)
 
     # ── Chat dialog ──────────────────────────────────────────────────
     def _open_chat(self):
         if self._chat_dialog is None:
             self._chat_dialog = ChatDialog()
             self._chat_dialog.message_sent.connect(self._on_user_message)
+            self._chat_dialog.image_message_sent.connect(self._on_image_message)
             self._chat_dialog.open_settings.connect(self._open_settings)
             self._chat_dialog.clear_requested.connect(self._on_clear_history)
             self._chat_dialog.abort_requested.connect(self._on_abort)
@@ -300,6 +394,23 @@ class BuddyApp:
             self._chat_dialog.save_checkpoint()  # mark UI rollback point before engine starts
         self.pet.set_pet_state(PetState.WORKING)
         self.engine.send_message(text)
+
+    def _on_image_message(self, text: str, images: list):
+        """User sent a message with attached image(s)."""
+        # Check if provider is ready
+        needs_key = PROVIDER_PRESETS.get(self.settings.provider, {}).get("needs_api_key", True)
+        if needs_key and not self.settings.api_key:
+            if self._chat_dialog:
+                self._chat_dialog.add_assistant_message(
+                    "I need an API key to chat! Click the <b>gear icon</b> "
+                    "in the title bar to open Settings."
+                )
+            return
+        if self._chat_dialog:
+            self._chat_dialog.set_thinking(True)
+            self._chat_dialog.save_checkpoint()
+        self.pet.set_pet_state(PetState.WORKING)
+        self.engine.send_message_with_images(text, images)
 
     def _handle_command(self, text: str):
         """Execute a slash command and show result in chat."""

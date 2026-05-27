@@ -123,13 +123,26 @@ class OpenAIProvider(BaseProvider):
         ]
 
     def format_tool_results(self, tool_calls: list[ToolCall], results: list[dict]) -> dict:
-        """Format as OpenAI tool messages (one message per tool result)."""
+        """Format as OpenAI tool messages (one message per tool result).
+        Note: OpenAI does not support image blocks in tool results.
+        Image results are degraded to text description.
+        """
         tool_messages = []
         for tc, result in zip(tool_calls, results):
+            output = result.get("output", "")
+
+            # OpenAI doesn't support image blocks in tool results — degrade to text
+            if isinstance(output, dict) and output.get("type") == "image_result":
+                output = (
+                    f"[Screenshot captured ({output.get('media_type', 'image/jpeg')}). "
+                    f"Note: Current model does not support image analysis in tool results. "
+                    f"User's request: {output.get('text', 'N/A')}]"
+                )
+
             tool_messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": result.get("output", ""),
+                "content": str(output) if output else "",
             })
         return {"_multi_messages": tool_messages}
 
@@ -347,6 +360,33 @@ class OpenAIProvider(BaseProvider):
                     for block in content
                     if isinstance(block, dict) and block.get("type") == "tool_result"
                 ]
+
+            # Check if this is a multimodal message (has image blocks)
+            has_image = any(
+                isinstance(b, dict) and b.get("type") == "image"
+                for b in content
+            )
+            if has_image and role == "user":
+                # Convert Anthropic image format to OpenAI image_url format
+                oai_content = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    bt = block.get("type", "")
+                    if bt == "text":
+                        oai_content.append({"type": "text", "text": block.get("text", "")})
+                    elif bt == "image":
+                        source = block.get("source", {})
+                        if source.get("type") == "base64":
+                            media_type = source.get("media_type", "image/jpeg")
+                            data = source.get("data", "")
+                            oai_content.append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{data}",
+                                },
+                            })
+                return {"role": "user", "content": oai_content}
 
             # text + tool_use blocks → assistant message with tool_calls
             text_parts = []

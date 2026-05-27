@@ -15,6 +15,7 @@ class PetContextMenu(QObject):
     settings_requested = pyqtSignal()
     sleep_requested = pyqtSignal()
     wake_requested = pyqtSignal()
+    screenshot_requested = pyqtSignal()
     quit_requested = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -49,6 +50,9 @@ class PetContextMenu(QObject):
 
         tasks_action = menu.addAction("Tasks...")
         tasks_action.triggered.connect(self.task_panel_requested.emit)
+
+        screenshot_action = menu.addAction("\U0001f4f8 Screenshot...")
+        screenshot_action.triggered.connect(self.screenshot_requested.emit)
 
         menu.addSeparator()
 
