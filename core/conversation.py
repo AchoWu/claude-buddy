@@ -161,6 +161,22 @@ class ConversationManager:
 
     # ── Message API ───────────────────────────────────────────────
 
+    def find_recent_image(self) -> tuple[str, str] | None:
+        """Search recent messages for an image content block.
+
+        Returns:
+            (base64_data, media_type) tuple, or None if no image found.
+        """
+        for msg in reversed(self._messages):
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "image":
+                        source = block.get("source", {})
+                        if source.get("type") == "base64" and source.get("data"):
+                            return (source["data"], source.get("media_type", "image/jpeg"))
+        return None
+
     def add_user_message(self, text: str):
         msg = {"role": "user", "content": text, "timestamp": time.time()}
         self._messages.append(msg)

@@ -391,6 +391,10 @@ class PromptToolProvider(BaseProvider):
                 if isinstance(block, dict):
                     if block.get("type") == "text":
                         parts.append(block.get("text", ""))
+                    elif block.get("type") == "image":
+                        parts.append(
+                            "[User attached an image. Use the AnalyzeImage tool to analyze it.]"
+                        )
                     elif block.get("type") == "tool_result":
                         parts.append(f"[Tool Result]: {block.get('content', '')}")
             return {"role": role, "content": "\n".join(parts) if parts else str(content)}

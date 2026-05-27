@@ -508,18 +508,29 @@ class LLMEngine(QObject):
             thread = threading.Thread(target=self._run_loop, daemon=True)
             thread.start()
         else:
-            # ── Fallback Mode: store images, let agent call AnalyzeImage tool ──
-            # Store all images — AnalyzeImage will process them one by one or together
-            self._pending_image = {
-                "data": images[0],  # primary image for AnalyzeImage
-                "media_type": media_type,
-                "all_images": images,  # full list
-            }
+            # ── Fallback Mode: store images in conversation (CC-aligned) ──
+            # Images are stored as content blocks in the user message so they
+            # persist in conversation history and can be referenced in later turns.
             display_text = user_text or "Please analyze these images."
             n = len(images)
             chips = ' '.join(f'[Image #{i+1}]' for i in range(n))
-            full_text = f"{chips} {display_text}"
-            self._conversation.add_user_message(full_text)
+
+            # Build content blocks: images + text (same structure as CC mode)
+            content_blocks = []
+            for img_b64 in images:
+                content_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": img_b64,
+                    },
+                })
+            content_blocks.append({
+                "type": "text",
+                "text": f"{chips} {display_text}",
+            })
+            self._conversation.add_user_message_blocks(content_blocks)
             self.state_changed.emit("work")
             self._msg_count_at_query_start = len(self._conversation._messages)
             thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -547,21 +558,33 @@ class LLMEngine(QObject):
         return False
 
     def call_vision_model(self, prompt: str) -> str:
-        """Called by AnalyzeImage tool — sends pending image to Venus vision model.
+        """Called by AnalyzeImage tool — sends image to Venus vision model.
 
-        Uses Venus API (v2.open.venus.oa.com) with gemini-3-flash model.
-        Auth via venus_api_base SDK (secret_id + secret_key).
+        CC-aligned: image data is retrieved from conversation messages (where it's
+        stored as content blocks), not from a temporary variable.
 
         Args:
             prompt: The analysis prompt set by the main agent
         Returns:
             Text description from vision model
         """
-        if not self._pending_image:
-            return "[No image available. User did not attach an image.]"
+        # Find image data from conversation messages (search recent messages)
+        image_data = None
+        media_type = "image/jpeg"
 
-        image_data = self._pending_image["data"]
-        media_type = self._pending_image.get("media_type", "image/jpeg")
+        # Priority 1: _pending_image (set by FileRead when reading image files)
+        if self._pending_image:
+            image_data = self._pending_image["data"]
+            media_type = self._pending_image.get("media_type", "image/jpeg")
+        else:
+            # Priority 2: search conversation for the most recent image content block
+            # (set by user paste/drag/upload via send_message_with_images)
+            result = self._conversation.find_recent_image()
+            if result:
+                image_data, media_type = result
+
+        if not image_data:
+            return "[No image available. User did not attach an image.]"
 
         from config import VISION_MODEL, VISION_SECRET_ID, VISION_SECRET_KEY, VISION_APP_GROUP_ID
 
@@ -693,7 +716,7 @@ class LLMEngine(QObject):
         finally:
             self._is_running = False
             self._abort_signal.reset()
-            self._pending_image = None  # Clear after full loop completes
+            self._pending_image = None  # Clear FileRead pending image after loop
             self.state_changed.emit("idle")
             self.cost_updated.emit(self._session_cost.summary())
             # #51 CC-aligned: persist cost to settings.local.json

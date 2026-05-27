@@ -90,11 +90,10 @@ class OpenAIProvider(BaseProvider):
         text = message.content or ""
         raw_content = self._build_raw_assistant(message)
 
-        # Extract reasoning_content (hy3 thinking mode)
+        # Extract reasoning_content (hy3 thinking mode) — stored separately, not in display text
         reasoning = getattr(message, "reasoning_content", None) or ""
         if reasoning:
             raw_content["_reasoning"] = reasoning
-            # Don't mix reasoning into display text — it's stored separately
 
         # Extract real token usage
         if response.usage:
