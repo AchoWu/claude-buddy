@@ -2,6 +2,7 @@
 Chat Dialog — full conversation window with translucent glass-morphism design.
 """
 
+import os
 import re
 import logging
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QSize, QRectF
@@ -21,6 +22,9 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Supported image extensions (used for paste/drop/attach file-type detection)
+_IMAGE_EXTS = frozenset({'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'})
 
 
 # Keys checked (in order) when summarizing a tool-call's input for the bubble.
@@ -937,7 +941,6 @@ class ChatDialog(QWidget):
 
     message_sent = pyqtSignal(str)   # user typed a message
     image_message_sent = pyqtSignal(str, list)  # (text, [base64_images]) — user sent message with image(s)
-    file_message_sent = pyqtSignal(str)  # user sent message with file content inlined
     abort_requested = pyqtSignal()   # user clicked stop during thinking
     open_settings = pyqtSignal()     # user clicked settings button
     clear_requested = pyqtSignal()   # user clicked clear history button
@@ -1697,11 +1700,9 @@ class ChatDialog(QWidget):
         if not path:
             return
 
-        import os
         ext = os.path.splitext(path)[1].lower()
-        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 
-        if ext in image_exts:
+        if ext in _IMAGE_EXTS:
             # Image: existing flow
             self._insert_image_chip()
             QTimer.singleShot(0, lambda: self._async_load_file(path))
@@ -1711,9 +1712,16 @@ class ChatDialog(QWidget):
 
     def _attach_file(self, path: str):
         """Attach a non-image file — insert path as [filename] chip (CC-aligned: lazy load via FileRead)."""
-        import os
         filename = os.path.basename(path)
         abs_path = os.path.abspath(path)
+
+        # Handle basename collision (e.g. two different config.py from different dirs)
+        if filename in self._pending_files:
+            base, ext = os.path.splitext(filename)
+            i = 2
+            while f"{base}_{i}{ext}" in self._pending_files:
+                i += 1
+            filename = f"{base}_{i}{ext}"
 
         # Store file path (not content) — model will use FileRead when needed
         self._pending_files[filename] = abs_path
@@ -1728,10 +1736,13 @@ class ChatDialog(QWidget):
         self._update_input_style_for_images()
 
     def _expand_file_contents(self) -> str:
-        """CC-aligned: expand file chips to paths (model uses FileRead to access content)."""
-        parts = []
+        """CC-aligned: expand file chips to paths with explicit FileRead instruction."""
+        parts = [
+            "The user attached the following file(s). "
+            "You MUST use the FileRead tool to read their contents before answering:"
+        ]
         for filename, filepath in self._pending_files.items():
-            parts.append(f"[File: {filename} → {filepath}]")
+            parts.append(f"  - {filename}: {filepath}")
         return "\n".join(parts)
 
     def _update_input_style_for_images(self):
@@ -1844,7 +1855,7 @@ class ChatDialog(QWidget):
             # Ctrl+V: try image paste first
             if (key == Qt.Key.Key_V and
                     event.modifiers() == Qt.KeyboardModifier.ControlModifier):
-                if self._try_paste_image():
+                if self._try_paste_attachment():
                     return True  # consumed — don't let QLineEdit paste text
             # ↑/↓: history navigation
             elif key == Qt.Key.Key_Up:
@@ -1855,17 +1866,15 @@ class ChatDialog(QWidget):
                 return True
         return super().eventFilter(obj, event)
 
-    def _try_paste_image(self) -> bool:
+    def _try_paste_attachment(self) -> bool:
         """Check clipboard for image or file, insert appropriate chip. Returns True if handled."""
         from PyQt6.QtWidgets import QApplication
-        import os
 
         clipboard = QApplication.clipboard()
         mime = clipboard.mimeData()
         if not mime:
             return False
 
-        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 
         # Check for file URLs in clipboard (copied files from file manager)
         if mime.hasUrls():
@@ -1875,7 +1884,7 @@ class ChatDialog(QWidget):
                 if not path or not os.path.isfile(path):
                     continue
                 ext = os.path.splitext(path)[1].lower()
-                if ext in image_exts:
+                if ext in _IMAGE_EXTS:
                     self._insert_image_chip()
                     QTimer.singleShot(0, lambda p=path: self._async_load_file(p))
                 else:
@@ -2090,17 +2099,19 @@ class ChatDialog(QWidget):
             event.ignore()
 
     def dragMoveEvent(self, event):
-        event.acceptProposedAction()
+        """Only accept move if content is valid (files or images)."""
+        mime = event.mimeData()
+        if mime and (mime.hasUrls() or mime.hasImage()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def dropEvent(self, event):
         """Handle dropped files/images — insert appropriate chips."""
-        import os
         mime = event.mimeData()
         if not mime:
             event.ignore()
             return
-
-        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 
         if mime.hasUrls():
             for url in mime.urls():
@@ -2108,16 +2119,18 @@ class ChatDialog(QWidget):
                 if not path or not os.path.isfile(path):
                     continue
                 ext = os.path.splitext(path)[1].lower()
-                if ext in image_exts:
+                if ext in _IMAGE_EXTS:
                     self._insert_image_chip()
                     QTimer.singleShot(0, lambda p=path: self._async_load_file(p))
                 else:
                     self._attach_file(path)
             event.acceptProposedAction()
+            self._input.setFocus()
         elif mime.hasImage():
             self._insert_image_chip()
             QTimer.singleShot(0, self._async_load_clipboard)
             event.acceptProposedAction()
+            self._input.setFocus()
         else:
             event.ignore()
 
@@ -2125,7 +2138,7 @@ class ChatDialog(QWidget):
         # Ctrl+V: try to paste image (when focus is NOT on input)
         if (event.key() == Qt.Key.Key_V and
                 event.modifiers() == Qt.KeyboardModifier.ControlModifier):
-            if self._try_paste_image():
+            if self._try_paste_attachment():
                 return
         if event.key() == Qt.Key.Key_Escape:
             self.hide()
