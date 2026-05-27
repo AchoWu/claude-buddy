@@ -630,8 +630,8 @@ class LLMEngine(QObject):
                         return "[Vision model: processing incomplete]"
 
                     result = ret["data"]["response"]
-                    # Clear pending image after successful analysis
-                    self._pending_image = None
+                    # Keep _pending_image available for the rest of this tool loop
+                    # (model may call AnalyzeImage multiple times with different prompts)
                     return result
 
                 except Exception as retry_err:
@@ -693,6 +693,7 @@ class LLMEngine(QObject):
         finally:
             self._is_running = False
             self._abort_signal.reset()
+            self._pending_image = None  # Clear after full loop completes
             self.state_changed.emit("idle")
             self.cost_updated.emit(self._session_cost.summary())
             # #51 CC-aligned: persist cost to settings.local.json
