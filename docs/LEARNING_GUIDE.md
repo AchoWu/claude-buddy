@@ -35,8 +35,9 @@ BUDDY 是一个桌面 AI 宠物：一个住在你屏幕上的小动画角色，�
 | 语言 | Python 3.11+ | 全栈 |
 | 桌面 UI | PyQt6 | 无边框窗口、毛玻璃设计、动画精灵 |
 | LLM API | anthropic SDK, openai SDK | 模型调用 |
+| Vision API | venus_api_base | 图片分析 (gemini-3-flash) |
 | HTTP | httpx | 异步网络请求 |
-| 图像 | Pillow | 精灵图处理 |
+| 图像 | Pillow | 精灵图处理、截图压缩 |
 | Token 计数 | tiktoken (cl100k_base) | 精确 token 统计，CJK 感知 |
 
 ### 架构总览
@@ -48,13 +49,15 @@ BUDDY 是一个桌面 AI 宠物：一个住在你屏幕上的小动画角色，�
 ├─────────────┬─────────────┬──────────────┬──────────────────┤
 │   ui/       │  core/      │  tools/      │  prompts/        │
 │             │             │              │                  │
-│ PetWindow   │ engine.py   │ 37 个工具    │ system.py        │
+│ PetWindow   │ engine.py   │ 53 个工具    │ system.py        │
 │ ChatDialog  │ ⭐ 引擎核心  │ (BaseTool)   │ (20节系统提示)    │
 │ Permission  │             │              │                  │
 │ Settings    │ providers/  │ base.py      │ compact.py       │
 │ AskUser     │  ├ anthropic│              │ templates.py     │
 │ SpeechBub   │  ├ openai   │              │                  │
 │ Sprite      │  └ prompttool              │                  │
+│ Screenshot  │             │              │                  │
+│ Overlay     │ vision.py   │              │                  │
 │             │             │              │                  │
 │             │ conversation│              │                  │
 │             │ (8层压缩)   │              │                  │
@@ -85,14 +88,15 @@ main.py
  │   ├─ core/memory.py           # 4 类记忆系统
  │   └─ prompts/system.py        # 20 节系统提示构建器
  ├─ core/tool_registry.py        # 工具注册、权限、并发标记
- │   └─ tools/*.py               # 37 个工具
+ │   └─ tools/*.py               # 53 个工具 (含 Vision: Screenshot, AnalyzeImage)
  ├─ core/commands.py             # 50+ 斜杠命令
  ├─ core/task_manager.py         # 任务系统 V2
  ├─ core/cron/scheduler.py       # 定时任务
  ├─ core/dream.py                # 主动后台任务
+ ├─ core/vision.py               # 截屏 + base64 编码 (Vision 管线)
  ├─ core/bridge/                 # IDE 桥接
  ├─ core/services/               # 插件、Hook、MCP、LSP 等
- └─ ui/*.py                      # 11 个 UI 组件
+ └─ ui/*.py                      # 12 个 UI 组件 (含 ScreenshotOverlay)
 ```
 
 ---
@@ -122,11 +126,12 @@ main.py
 1. 加载设置 (Settings)
 2. 创建 PetWindow (桌面精灵)
 3. 创建 LLMEngine (核心引擎)
-4. 创建 ToolRegistry (注册 37 个工具)
+4. 创建 ToolRegistry (注册 53 个工具)
 5. 创建 MemoryManager (记忆系统)
 6. 创建 CronScheduler (定时器)
-7. 加载上次会话
-8. 启动 autosave 定时器 (30 秒)
+7. 连接 Screenshot overlay (截屏)
+8. 加载上次会话
+9. 启动 autosave 定时器 (30 秒)
 9. 连接所有 pyqtSignal ← 这是关键！
 10. 刷新 Provider
 11. 绑定 Pet 点击/拖拽事件
@@ -331,19 +336,20 @@ def format_tool_results(tool_calls, results) → dict  # 把执行结果 → API
 | `tools/file_read_tool.py` | ~273 | 文件读取 (典型读工具) |
 | `tools/ask_user_tool.py` | ~140 | AskUser (特殊交互工具) |
 
-### 工具分类 (37 个)
+### 工具分类 (53 个)
 
 ```
 文件操作 (5)    FileRead, FileWrite, FileEdit, Glob, NotebookEdit
 代码执行 (3)    Bash, TerminalCapture, LSP
 搜索网络 (3)    WebSearch, WebFetch, WebBrowser
+视觉分析 (2)    Screenshot (截屏), AnalyzeImage (Venus Vision API)
 AI 协作 (5)     Agent, SendMessage, TeamCreate, TeamDelete, AskUser
 任务管理 (6)    TaskCreate, TaskUpdate, TaskList, TaskGet, TaskOutput, TaskStop
 定时调度 (3)    CronCreate, CronDelete, CronList
 计划模式 (2)    EnterPlanMode, ExitPlanMode
 记忆灵魂 (3)    SelfReflect, SelfModify, DiaryWrite
 MCP (3)         MCPTool, ListMcpResources, ReadMcpResource
-其他 (4)        Skill, Workflow, PushNotification, CtxInspect ...
+其他 (4+)       Skill, Workflow, PushNotification, CtxInspect, SnipTool ...
 ```
 
 ### 关键代码走读

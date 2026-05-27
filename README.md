@@ -12,8 +12,8 @@
   <img src="https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white" />
   <img src="https://img.shields.io/badge/UI-PyQt6-41CD52?logo=qt&logoColor=white" />
   <img src="https://img.shields.io/badge/LLM-Claude%20%7C%20GPT%20%7C%20Any-orange" />
-  <img src="https://img.shields.io/badge/tools-37-blueviolet" />
-  <img src="https://img.shields.io/badge/lines-38K+-lightgrey" />
+  <img src="https://img.shields.io/badge/tools-53-blueviolet" />
+  <img src="https://img.shields.io/badge/lines-28K+-lightgrey" />
   <img src="https://img.shields.io/badge/license-MIT-green" />
 </p>
 
@@ -44,11 +44,12 @@ A tiny animated character that lives on your desktop, backed by the full power o
 | Feature | Description |
 |---------|-------------|
 | **Tool Loop** | 25-round tool execution loop with streaming, abort, retry |
-| **37 Tools** | File R/W/Edit, Bash, Glob, Grep, Web Search/Fetch, Agent, MCP, LSP, Cron, Tasks... |
+| **53 Tools** | File R/W/Edit, Bash, Glob, Grep, Web Search/Fetch, Vision/Screenshot, Agent, MCP, LSP, Cron, Tasks... |
 | **3 Providers** | Anthropic (native tool_use), OpenAI (function calling), PromptTool (any model via XML) |
 | **8-Layer Compaction** | Microcompact → Snip → Tool-compress → Group → Memory-preserve → Mechanical → LLM → Reactive |
 | **Smart Retry** | Exponential backoff, 529/429 separation, context-too-long recovery, max-output escalation |
 | **Memory System** | 4-category taxonomy (user/feedback/project/reference), semantic files, auto-extraction |
+| **Vision / Image** | Auto-detect model capability; direct image blocks (Claude/GPT-4o) or dedicated vision model fallback |
 | **Sub-Agents** | Spawn child agents, team management, inter-agent messaging |
 | **Cron & Dreams** | Scheduled tasks, proactive "dream" background tasks |
 | **Plan Mode** | Read-only exploration mode — investigate before modifying |
@@ -59,6 +60,7 @@ A tiny animated character that lives on your desktop, backed by the full power o
 |---------|-------------|
 | **Animated Sprite** | Idle, working, celebrating, sleeping states with smooth transitions |
 | **Glass Chat UI** | Translucent glass-morphism chat window with streaming markdown |
+| **Image & File Attach** | Paste (Ctrl+V), drag & drop, or click to attach images/files with [Image #N] / [file.ext] chips |
 | **Inline AskUser** | Interactive option chips right in the chat flow — no popups |
 | **Draggable** | Lives anywhere on your desktop, remembers position |
 | **50+ Slash Commands** | `/init`, `/diff`, `/review`, `/memory`, `/plan`, `/cost`, `/rewind`... |
@@ -94,8 +96,9 @@ Buddy appears on your desktop. Click on it to open the chat. That's it.
 ```
 main.py                    # Entry point — wires everything together
 ├── core/
-│   ├── engine.py          # LLM engine (55KB) — tool loop, streaming, retry
+│   ├── engine.py          # LLM engine (55KB) — tool loop, streaming, retry, vision
 │   ├── conversation.py    # 8-layer compaction pipeline
+│   ├── vision.py          # Screen capture + base64 encoding
 │   ├── commands.py        # 50+ slash commands
 │   ├── memory.py          # 4-category memory system
 │   ├── providers/         # Anthropic, OpenAI, PromptTool
@@ -103,10 +106,11 @@ main.py                    # Entry point — wires everything together
 │   ├── cron/              # Cron scheduler
 │   ├── bridge/            # IDE bridge (VS Code / JetBrains)
 │   └── services/          # MCP, LSP, analytics, hooks, plugins...
-├── tools/                 # 37 tools, one file each
+├── tools/                 # 53 tools, one file each
 ├── ui/
 │   ├── chat_dialog.py     # Glass-morphism chat with streaming bubbles
 │   ├── pet_window.py      # Animated desktop sprite
+│   ├── screenshot_overlay.py  # Region selection for screenshots
 │   ├── permission_dialog.py
 │   └── ...
 ├── prompts/               # System prompt builder, compaction templates
@@ -135,7 +139,7 @@ You type "fix the bug in auth.py"
 
 ---
 
-## Tools (37)
+## Tools (53)
 
 <details>
 <summary><b>Click to expand full tool list</b></summary>
@@ -145,6 +149,7 @@ You type "fix the bug in auth.py"
 | **File System** | `FileRead`, `FileWrite`, `FileEdit`, `Glob`, `NotebookEdit` |
 | **Code** | `Bash`, `Grep`, `TerminalCapture`, `LSP` |
 | **Search** | `WebSearch` (DuckDuckGo), `WebFetch` (URL→markdown), `WebBrowser` |
+| **Vision** | `Screenshot` (capture screen), `AnalyzeImage` (Venus API gemini-3-flash) |
 | **AI Agents** | `Agent` (sub-agent), `SendMessage`, `TeamCreate`, `TeamDelete` |
 | **Tasks** | `TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`, `TaskOutput`, `TaskStop` |
 | **Scheduling** | `CronCreate`, `CronDelete`, `CronList` |
@@ -226,9 +231,9 @@ Supports `@include path/to/file.md` directives with circular reference preventio
 
 | Provider | How it works |
 |----------|-------------|
-| **Anthropic** | Native `tool_use` blocks, adaptive thinking, `cache_control`, effort levels |
-| **OpenAI** | `function` calling format, streaming `tool_calls` accumulation |
-| **PromptTool** | For any model — injects tool descriptions into system prompt, parses `<tool_call>` XML from output |
+| **Anthropic** | Native `tool_use` blocks, adaptive thinking, `cache_control`, effort levels, image content blocks |
+| **OpenAI** | `function` calling format, streaming `tool_calls` accumulation, `image_url` conversion for Vision |
+| **PromptTool** | For any model — injects tool descriptions into system prompt, parses `<tool_call>` XML from output, DeepSeek-R1 `reasoning_content` handling |
 
 Set your API key in Settings (click the ⚙ gear icon) or via environment variable.
 
@@ -242,10 +247,11 @@ Claude Buddy is architecturally aligned with Claude Code's source:
 |--------|------------|-------------|
 | Runtime | Bun + React/Ink (terminal) | Python + PyQt6 (desktop GUI) |
 | Engine | QueryEngine.ts (46KB) | engine.py (55KB) |
-| Tools | ~40 tools | 37 tools |
+| Tools | ~40 tools | 53 tools |
 | Compaction | 11-variant system | 8-layer pipeline |
 | Memory | 4-category + MEMORY.md | Same (v4 aligned) |
 | Task System | V2 (owner, blocks/blockedBy) | Same (V2 aligned) |
+| Vision | Native (Claude sees images directly) | Auto-detect: direct or fallback to dedicated vision model |
 | Providers | Anthropic only | Anthropic + OpenAI + any (PromptTool) |
 | UI | Terminal (React/Ink) | Desktop pet + glass chat |
 | Personality | Professional CLI | Animated pixel buddy |
@@ -268,11 +274,11 @@ python tests/test_cap_engine.py      # CC-alignment tests
 
 ### Project Stats
 
-- **148 Python files**
-- **~38,000 lines of code**
-- **37 tools**, **50+ commands**
+- **~150 Python files**
+- **~28,000 lines of code**
+- **53 tools**, **50+ commands**
 - **8-layer compaction pipeline**
-- **3 LLM providers**
+- **3 LLM providers** + dedicated Vision model
 
 ---
 
