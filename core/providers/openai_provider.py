@@ -94,7 +94,7 @@ class OpenAIProvider(BaseProvider):
         reasoning = getattr(message, "reasoning_content", None) or ""
         if reasoning:
             raw_content["_reasoning"] = reasoning
-            text = f"<thinking>\n{reasoning}\n</thinking>\n\n{text}"
+            # Don't mix reasoning into display text — it's stored separately
 
         # Extract real token usage
         if response.usage:
