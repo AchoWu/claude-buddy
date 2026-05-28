@@ -21,6 +21,11 @@ def _generate_write_diff(old_content: str, new_content: str, file_path: str,
     """
     old_lines = old_content.splitlines(keepends=True)
     new_lines = new_content.splitlines(keepends=True)
+    # Ensure every line ends with \n so difflib doesn't merge -/+ lines
+    if old_lines and not old_lines[-1].endswith("\n"):
+        old_lines[-1] += "\n"
+    if new_lines and not new_lines[-1].endswith("\n"):
+        new_lines[-1] += "\n"
     diff = difflib.unified_diff(
         old_lines, new_lines,
         fromfile=f"a/{file_path}",
