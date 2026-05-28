@@ -26,7 +26,8 @@ _DESTRUCTIVE_CMD_PATTERNS = [
     r"\bdrop\s+table\b",                   # SQL DROP TABLE
     r"\bdrop\s+database\b",                # SQL DROP DATABASE
     r"\btruncate\s+table\b",              # SQL TRUNCATE
-    r"\bformat\b",                         # format drive
+    r"\bformat\s+[A-Za-z]:",             # Windows: format C:
+    r"\bformat\s+/dev/",                  # Linux: format /dev/sda
     r"\bmkfs\b",                           # make filesystem (destructive)
     r"\bsudo\s+rm\b",                      # sudo rm
 ]
@@ -54,17 +55,18 @@ def _is_destructive_bash(tool_name: str, tool_input: dict) -> bool:
 def destructive_guard(context: dict) -> HookResult:
     """
     pre_tool_use hook: block destructive operations unless AskUser was
-    already called in this query turn.
+    called recently (within 2 rounds) in the current query turn.
 
     The hook receives:
       - tool: tool name
       - input: tool input dict
       - round: current round number
-      - ask_user_called_this_turn: bool (injected by engine)
+      - ask_user_round: round when AskUser was last called (-1 if never)
     """
     tool_name = context.get("tool", "")
     tool_input = context.get("input", {})
-    ask_user_called = context.get("ask_user_called_this_turn", False)
+    current_round = context.get("round", 0)
+    ask_user_round = context.get("ask_user_round", -1)
 
     # Check if this is a destructive operation
     is_destructive = (
@@ -75,8 +77,8 @@ def destructive_guard(context: dict) -> HookResult:
     if not is_destructive:
         return HookResult(success=True)
 
-    # If AskUser was already called this turn, allow it
-    if ask_user_called:
+    # Allow if AskUser was called within 2 rounds (confirmation is still fresh)
+    if ask_user_round >= 0 and (current_round - ask_user_round) <= 2:
         return HookResult(success=True)
 
     # Block and instruct the model to ask the user first

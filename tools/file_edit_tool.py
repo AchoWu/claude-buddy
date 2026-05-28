@@ -83,7 +83,9 @@ def _generate_diff(old_content: str, new_content: str, file_path: str,
     Shows added/removed lines with @@ hunk headers."""
     old_lines = old_content.splitlines(keepends=True)
     new_lines = new_content.splitlines(keepends=True)
-    # Ensure every line ends with \n so difflib doesn't merge -/+ lines
+    # Ensure every line ends with \n so difflib doesn't merge -/+ lines.
+    # Trade-off: loses "\ No newline at end of file" marker, but this diff
+    # is only used for UI display (not patch apply), so accuracy is acceptable.
     if old_lines and not old_lines[-1].endswith("\n"):
         old_lines[-1] += "\n"
     if new_lines and not new_lines[-1].endswith("\n"):
