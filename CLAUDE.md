@@ -51,7 +51,7 @@ This file provides guidance to Claude Code when working with the BUDDY codebase.
 Three providers, all implementing `BaseProvider`:
 - `AnthropicProvider` -- native tool_use, adaptive thinking, cache_control, effort, structured output, image content blocks in tool_result
 - `OpenAIProvider` -- function calling format, streaming with tool_calls accumulation, image_url conversion for Vision models
-- `PromptToolProvider` -- for models without native tool support; injects tool descriptions into system prompt, parses `<tool_call>` tags from output, DeepSeek-R1 reasoning_content handling
+- `PromptToolProvider` -- for models without native tool support; injects tool descriptions into system prompt, parses `<tool_call>` tags from output, DeepSeek-R1 reasoning_content handling, `_simplify_message` converts image blocks to text hint for non-vision models
 
 ### Tool System (`tools/`, 53 tools)
 
@@ -82,6 +82,8 @@ Each tool defines: `name`, `description`, `input_schema`, `is_read_only`, `concu
 - L7: Reactive (force compact on context_too_long, feature-flag gated)
 - Adaptive threshold: 8+ msgs in 2min -> offset -5 (compact sooner)
 - CJK-aware token estimation: Chinese 1.5 chars/token, English 4 chars/token
+- `find_recent_image()` — search reversed messages for latest image content block (CC-aligned: images persist in conversation, accessible across turns)
+- `add_user_message_blocks(content_blocks)` — stores multimodal messages (text + image blocks) with token estimation
 
 ### Memory System (`core/memory.py`)
 
@@ -127,6 +129,17 @@ All PyQt6, frameless translucent windows:
 - `system.py` (~30KB) -- 20-section system prompt builder (identity, rules, tool reference, safety, git workflow, etc.)
 - `compact.py` -- compaction prompt templates (NO_TOOLS_PREAMBLE, 9-section structured summary)
 - `templates.py` -- reusable prompt fragments
+
+### Hook System (`core/services/hooks.py`, `core/services/builtin_hooks.py`)
+
+CC-aligned lifecycle event system. Hooks fire at `pre_tool_use`, `post_tool_use`, `session_start`, etc.
+
+Built-in hooks (registered automatically in `main.py`):
+- **`destructive_guard`** -- Blocks destructive Bash/PowerShell commands (rm, del, git push --force, git reset --hard, DROP TABLE, mkfs, etc.) unless AskUser was called within 2 rounds. Forces the model to confirm with the user before irreversible operations.
+
+User-defined hooks: configure in `~/.claude-buddy/settings.json` under `hooks` key. JSON stdin/stdout protocol for bash command hooks.
+
+Key design: `pre_tool_use` hooks can return `block=True` to cancel tool execution. The engine passes `ask_user_round` in the hook context so hooks can enforce confirmation freshness.
 
 ## Code Conventions
 
@@ -187,6 +200,8 @@ Key files: `core/vision.py` (capture + base64), `tools/analyze_image_tool.py`, `
 | `core/vision.py` | Screen capture + base64 encoding for Vision |
 | `core/tool_registry.py` | Tool registration, concurrency_safe marking |
 | `core/task_manager.py` | Task CRUD with dependencies, high water mark IDs |
+| `core/services/hooks.py` | Hook registry: pre/post_tool_use lifecycle events |
+| `core/services/builtin_hooks.py` | destructive_guard: block rm/del/force-push without AskUser |
 
 ## Testing
 

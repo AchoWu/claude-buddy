@@ -751,6 +751,8 @@ R("/hello", "Say hello", lambda args, ctx: f"Hello, {args or 'world'}!")
 ```
 3. **创建定时任务**：让 BUDDY 创建一个 5 分钟提醒
 4. **看 Hook 系统**：在 `core/services/hooks.py` 里看 `pre_tool_use` Hook 的工作方式
+   - 内置 Hook 在 `core/services/builtin_hooks.py`：`destructive_guard` 阻止未确认的删除操作
+   - 用户自定义 Hook 在 `~/.claude-buddy/settings.json` 的 `hooks` 字段配置
 
 ### 掌握标准
 - [ ] 能说出 `__LLM_PROMPT__` 返回值的含义

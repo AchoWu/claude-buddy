@@ -9,13 +9,13 @@
 
 这些功能是让 BUDDY 从"带皮肤的 Claude"变成"有生命感的桌面伙伴"的关键。
 
-### ⬜ 1. 屏幕感知（Screenshot Agent）
-- [ ] 实现全屏/区域截图功能（PyQt6 QScreen.grabWindow）
-- [ ] 截图 → base64 → Vision API 分析
-- [ ] 用户说"帮我看看这个"时自动截取当前窗口
-- [ ] 增加快捷键触发截屏分析（如 Ctrl+Shift+S）
+### ✅ 1. 屏幕感知（Screenshot Agent）
+- [x] 实现全屏/区域截图功能（PyQt6 QScreen.grabWindow）
+- [x] 截图 → base64 → Vision API 分析
+- [x] 用户说"帮我看看这个"时自动截取当前窗口
+- [x] 增加快捷键触发截屏分析（如 Ctrl+Shift+S）
 - [ ] 宠物动画：截屏时宠物做"观察"动作
-- **价值**：桌面宠物相对终端 AI 的核心优势，无可替代
+- **状态**：核心功能已实现（2026-05-27）。Screenshot tool + ScreenshotOverlay + Vision pipeline 就绪。剩余：宠物观察动画。
 
 ### ⬜ 2. 剪贴板监听 + 智能建议（主动交互）
 - [ ] QClipboard 监听变化
@@ -56,12 +56,13 @@
 - [ ] 快捷键可自定义（settings 面板中配置）
 - [ ] 快捷键冲突检测
 
-### ⬜ 6. 安全性加固
+### 🔲 6. 安全性加固
 - [ ] API Key 存储迁移到 Windows Credential Manager（keyring 库）
-- [ ] Bash 工具：可配置命令黑名单（rm -rf、format、del /f 等）
+- [x] Bash 工具：可配置命令黑名单（rm -rf、format、del /f 等）— 2026-05-28 via `destructive_guard` hook
 - [ ] 文件写入路径白名单/黑名单
-- [ ] 权限对话框增加"始终允许此工具"选项
+- [x] 权限对话框增加"始终允许此工具"选项 — 已实现 `PermissionManager.always_allowed`
 - [ ] 敏感文件检测（.env、credentials 等不允许读取/提交）
+- **状态**：部分完成。destructive_guard hook 通过 pre_tool_use 拦截危险命令并强制 AskUser 确认。权限对话框已有 Always Allow/Deny。
 
 ### ⬜ 7. Abort 机制加固
 - [ ] 研究 qasync 集成方案（asyncio + Qt 事件循环）
@@ -195,4 +196,5 @@
 
 | 日期 | 变更 |
 |------|------|
+| 2026-05-28 | P0#1 Screenshot 标记完成；P1#6 安全性更新（destructive_guard hook + permission always-allow） |
 | 2026-05-25 | 初始版本，基于项目 code review 生成 |
