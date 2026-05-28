@@ -688,8 +688,8 @@ class AskUserBubble(QFrame):
                 card_layout.addWidget(chip)
 
         # ── Text input row ──────────────────────────────────────
-        input_row = QHBoxLayout()
-        input_row.setSpacing(4)
+        self._input_row = QHBoxLayout()
+        self._input_row.setSpacing(4)
         self._text_input = QLineEdit()
         self._text_input.setPlaceholderText(
             "Or type your own..." if self._options else "Type your response..."
@@ -708,7 +708,7 @@ class AskUserBubble(QFrame):
             }}
         """)
         self._text_input.returnPressed.connect(self._submit_text)
-        input_row.addWidget(self._text_input)
+        self._input_row.addWidget(self._text_input)
 
         send_btn = QPushButton("▶")
         send_btn.setFixedSize(30, 30)
@@ -724,8 +724,8 @@ class AskUserBubble(QFrame):
             QPushButton:hover {{ background: #E8913A; }}
         """)
         send_btn.clicked.connect(self._submit_text)
-        input_row.addWidget(send_btn)
-        card_layout.addLayout(input_row)
+        self._input_row.addWidget(send_btn)
+        card_layout.addLayout(self._input_row)
 
         # ── Multi-select submit button ──────────────────────────
         if self._multi_select and self._options:
@@ -810,33 +810,56 @@ class AskUserBubble(QFrame):
             self._finish(", ".join(labels))
 
     def _finish(self, answer: str):
-        """Lock the bubble and emit answer."""
+        """Lock the bubble into read-only state, preserving question + selected option."""
         self._submitted = True
-        # Replace interactive content with static result
-        # Remove all widgets from card
-        card_layout = self._card.layout()
-        while card_layout.count():
-            item = card_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-            elif item.layout():
-                # Clear sub-layout
-                sub = item.layout()
-                while sub.count():
-                    si = sub.takeAt(0)
-                    if si.widget():
-                        si.widget().deleteLater()
 
-        # Show static result
-        result_label = QLabel(
-            f"<span style='color:{CLAUDE_ORANGE}'>&#10003;</span>  "
-            f"<span style='color:rgba(255,255,255,180)'>{answer}</span>"
+        # ── Highlight selected chip, grey out unselected ──
+        for idx, chip in enumerate(self._chips):
+            label = self._options[idx].get("label", "") if idx < len(self._options) else ""
+            if label == answer or idx in self._selected:
+                # Selected: orange highlight, keep visible
+                chip.setStyleSheet(self._chip_style(True))
+                chip.setEnabled(False)
+                chip.setCursor(Qt.CursorShape.ArrowCursor)
+            else:
+                # Unselected: grey out and disable
+                chip.setStyleSheet(f"""
+                    QPushButton {{
+                        background: rgba(40, 40, 40, 120); color: rgba(255,255,255,60);
+                        border: 1px solid rgba(80,80,80,80); border-radius: 8px;
+                        padding: 7px 14px; font-size: 12px; text-align: left;
+                    }}
+                """)
+                chip.setEnabled(False)
+                chip.setCursor(Qt.CursorShape.ArrowCursor)
+
+        # ── Hide input row (text field + send button) ──
+        for j in range(self._input_row.count()):
+            w = self._input_row.itemAt(j)
+            if w and w.widget():
+                w.widget().hide()
+
+        # ── Hide multi-select submit button if present ──
+        if hasattr(self, '_submit_btn'):
+            self._submit_btn.hide()
+
+        # ── If answer was typed (not a chip), show it as a result line ──
+        answer_is_chip = any(
+            opt.get("label", "") == answer for opt in self._options
         )
-        result_label.setTextFormat(Qt.TextFormat.RichText)
-        result_label.setWordWrap(True)
-        result_label.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 12px; background: transparent; border: none;")
-        card_layout.addWidget(result_label)
+        if not answer_is_chip and answer:
+            result_label = QLabel(
+                f"<span style='color:{CLAUDE_ORANGE}'>&#10003;</span>  "
+                f"<span style='color:rgba(255,255,255,180)'>{answer}</span>"
+            )
+            result_label.setTextFormat(Qt.TextFormat.RichText)
+            result_label.setWordWrap(True)
+            result_label.setStyleSheet(
+                f"color: {TEXT_PRIMARY}; font-size: 12px; background: transparent; border: none;"
+            )
+            self._card.layout().addWidget(result_label)
 
+        # ── Dim the card border to signal "answered" state ──
         self._card.setStyleSheet(f"""
             QFrame {{
                 background: rgba(40, 40, 35, 160);
