@@ -1,9 +1,10 @@
 """
-Web Fetch Tool v2 — fetch and convert web page content.
+Web Fetch Tool v3 — fetch and convert web page content.
 Aligned with Claude Code's WebFetchTool:
   - 15-minute in-memory cache
   - Redirect detection and reporting
-  - Prompt-based extraction parameter
+  - Prompt-based extraction via LLM (CC: applyPromptToMarkdown)
+  - 100K character buffer (CC-aligned: MAX_MARKDOWN_LENGTH)
   - HTTP status code tracking
   - Byte count in output
 """
@@ -13,7 +14,13 @@ from urllib.parse import urlparse
 from tools.base import BaseTool
 
 
-# 15-minute self-cleaning cache
+# CC-aligned: 100K character limit (CC uses 100_000)
+MAX_CONTENT_LENGTH = 100_000
+
+# Threshold above which LLM extraction is used when a prompt is provided
+_EXTRACTION_THRESHOLD = 20_000
+
+# 15-minute self-cleaning cache (stores raw content before extraction)
 _fetch_cache: dict[str, dict] = {}
 _CACHE_TTL = 900  # 15 minutes
 
@@ -37,6 +44,62 @@ def _cache_set(url: str, content: str):
     _fetch_cache[url] = {"content": content, "time": time.time()}
 
 
+def _extract_with_llm(content: str, prompt: str, provider_call_fn, abort_signal=None) -> str:
+    """
+    CC-aligned: applyPromptToMarkdown — use LLM to extract relevant
+    information from fetched content based on the user's prompt.
+
+    This is the key differentiator vs naive truncation: instead of cutting
+    off content at a character limit, we ask the model to extract what's
+    relevant to the user's question.
+
+    Returns:
+        Extracted text prefixed with [LLM-extracted] marker.
+    """
+    if not provider_call_fn:
+        # No provider available — fall back to truncation
+        return content[:MAX_CONTENT_LENGTH]
+
+    # Truncate to MAX_CONTENT_LENGTH before sending to model (CC does this too)
+    if len(content) > MAX_CONTENT_LENGTH:
+        truncated = content[:MAX_CONTENT_LENGTH] + "\n\n[Content truncated due to length...]"
+    else:
+        truncated = content
+
+    extraction_prompt = (
+        f"Below is the content fetched from a web page. "
+        f"Extract and summarize the information relevant to this request: {prompt}\n\n"
+        f"Rules:\n"
+        f"- Return the relevant content faithfully — do not invent information\n"
+        f"- Preserve important details, code snippets, numbers, and quotes\n"
+        f"- If the entire content is relevant, return it as-is (shortened if needed)\n"
+        f"- If only parts are relevant, extract those parts with context\n"
+        f"- Keep the output under 15000 characters\n"
+        f"- Use markdown formatting\n\n"
+        f"---\n\n{truncated}"
+    )
+
+    try:
+        raw, _, text = provider_call_fn(
+            messages=[{"role": "user", "content": extraction_prompt}],
+            system="You are a content extraction assistant. Extract relevant information faithfully.",
+            tools=[],
+            max_tokens=4096,
+            abort_signal=abort_signal,
+        )
+        # Validate extraction succeeded (model returned meaningful content)
+        if text and len(text.strip()) > 100:
+            return (
+                f"[LLM-extracted from {len(content):,} chars, prompt: \"{prompt}\"]\n\n"
+                f"{text.strip()}"
+            )
+    except Exception:
+        pass
+
+    # Fallback: return truncated content if extraction fails
+    return content[:MAX_CONTENT_LENGTH]
+
+
 class WebFetchTool(BaseTool):
     name = "WebFetch"
     description = (
@@ -46,11 +109,11 @@ class WebFetchTool(BaseTool):
         "- JSON responses are returned as-is\n"
         "- 15-minute cache for repeated requests to the same URL\n"
         "- Redirect detection: reports if URL redirected to a different host\n"
-        "- Optional prompt parameter to extract specific information\n"
-        "- Returns first 10,000 characters\n\n"
+        "- When a prompt is provided and content is long, uses LLM to extract relevant info\n"
+        "- Returns up to 100,000 characters (summarized if longer)\n\n"
         "Parameters:\n"
         "- url: the URL to fetch (required)\n"
-        "- prompt: what information to extract (optional, helps focus the output)\n\n"
+        "- prompt: what information to extract (optional but recommended for large pages)\n\n"
         "NOTE: This tool WILL FAIL for authenticated/private URLs (Google Docs, Jira, etc.)."
     )
     input_schema = {
@@ -69,13 +132,37 @@ class WebFetchTool(BaseTool):
     }
     is_read_only = True
 
+    def __init__(self):
+        self._engine = None  # injected by ToolRegistry
+
+    def _get_provider_call_fn(self):
+        """Get the provider's call_sync function if available."""
+        if self._engine and self._engine._provider:
+            return self._engine._provider.call_sync
+        return None
+
+    def _get_abort_signal(self):
+        """Get the engine's abort signal if available."""
+        if self._engine:
+            return self._engine._abort_signal
+        return None
+
     def execute(self, input_data: dict) -> str:
         url = input_data["url"]
         prompt = input_data.get("prompt", "")
 
-        # Check cache first
+        # Check cache first — cache stores raw content, extraction runs on each call
         cached = _cache_get(url)
         if cached:
+            # If cached content is long and prompt provided, still do LLM extraction
+            if len(cached) > _EXTRACTION_THRESHOLD and prompt:
+                content = _extract_with_llm(
+                    cached, prompt,
+                    self._get_provider_call_fn(),
+                    self._get_abort_signal(),
+                )
+                return f"(cached) {content}\n({len(cached):,} chars cached)"
+            # Short content or no prompt — return as-is
             result = f"(cached) {cached}"
             if prompt:
                 result = f"[Extract: {prompt}]\n\n{result}"
@@ -110,8 +197,9 @@ class WebFetchTool(BaseTool):
             content_type = resp.headers.get("content-type", "")
             byte_count = len(resp.content)
 
+            # ── Convert to readable text ──────────────────────────────
             if "json" in content_type:
-                content = resp.text[:10000]
+                content = resp.text[:MAX_CONTENT_LENGTH]
             elif "html" in content_type:
                 try:
                     import html2text
@@ -119,23 +207,35 @@ class WebFetchTool(BaseTool):
                     h.ignore_links = False
                     h.ignore_images = True
                     h.body_width = 0
-                    content = h.handle(resp.text)[:10000]
+                    content = h.handle(resp.text)
                 except ImportError:
                     import re
                     text = re.sub(r"<[^>]+>", " ", resp.text)
                     text = re.sub(r"\s+", " ", text).strip()
-                    content = text[:10000]
+                    content = text
             else:
-                content = resp.text[:10000]
+                content = resp.text
 
-            # Cache the result
+            # Cache raw content (before extraction) so different prompts can reuse it
             _cache_set(url, content)
+
+            # ── CC-aligned: intelligent extraction vs naive truncation ──
+            used_extraction = False
+            if len(content) > _EXTRACTION_THRESHOLD and prompt:
+                content = _extract_with_llm(
+                    content, prompt,
+                    self._get_provider_call_fn(),
+                    self._get_abort_signal(),
+                )
+                used_extraction = True
+            elif len(content) > MAX_CONTENT_LENGTH:
+                content = content[:MAX_CONTENT_LENGTH] + "\n\n[Content truncated due to length...]"
 
             # Build output
             parts = []
             if redirect_info:
                 parts.append(redirect_info)
-            if prompt:
+            if prompt and not used_extraction:
                 parts.append(f"[Extract: {prompt}]\n")
             parts.append(content)
             parts.append(f"\n({byte_count:,} bytes fetched)")

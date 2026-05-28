@@ -160,6 +160,9 @@ class ToolRegistry:
         WebFetchTool = _get_web_fetch_tool()
         for cls in [WebSearchTool, WebFetchTool]:
             t = cls()
+            # Inject engine for WebFetch LLM extraction (CC: applyPromptToMarkdown)
+            if hasattr(t, '_engine'):
+                t._engine = self._engine
             self._tools[t.name] = t
 
         # ── Task tools: inject TaskManager (deferred) ─────────────────
