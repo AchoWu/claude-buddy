@@ -542,22 +542,33 @@ class BuddyApp:
         """Tool execution completed. CC-aligned: render diff inline for file tools."""
         if not self._chat_dialog:
             return
-        if name in ("FileEdit", "FileWrite") and "--- a/" in output:
-            # Extract file path from first line (e.g. "Successfully replaced... in /path")
-            file_path = ""
+        if name in ("FileEdit", "FileWrite"):
+            # Robust diff detection: support "--- a/path" (edit/overwrite)
+            # and "--- /dev/null" (new file creation)
             diff_text = ""
-            for line in output.splitlines():
-                if line.startswith("--- a/"):
-                    # Found diff start — everything from here is the diff
-                    idx = output.index(line)
-                    diff_text = output[idx:]
-                    # Remove the trailing [Show...] hint if present
-                    marker = "[Show the above diff"
-                    if marker in diff_text:
-                        diff_text = diff_text[:diff_text.index(marker)].rstrip()
-                    file_path = line[6:]  # strip "--- a/"
-                    break
+            file_path = ""
+
+            if "--- a/" in output:
+                for line in output.splitlines():
+                    if line.startswith("--- a/"):
+                        idx = output.index(line)
+                        diff_text = output[idx:]
+                        file_path = line[6:]  # strip "--- a/"
+                        break
+            elif "--- /dev/null" in output:
+                idx = output.index("--- /dev/null")
+                diff_text = output[idx:]
+                # Get file_path from "+++ b/" line
+                for line in diff_text.splitlines()[:3]:
+                    if line.startswith("+++ b/"):
+                        file_path = line[6:]
+                        break
+
             if diff_text:
+                # Remove the trailing [Show...] hint if present
+                marker = "[Show the above diff"
+                if marker in diff_text:
+                    diff_text = diff_text[:diff_text.index(marker)].rstrip()
                 self._chat_dialog.add_diff_result(file_path, diff_text)
 
     def _on_engine_state(self, state: str):

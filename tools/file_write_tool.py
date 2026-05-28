@@ -14,7 +14,11 @@ from tools.base import BaseTool
 
 def _generate_write_diff(old_content: str, new_content: str, file_path: str,
                          context_lines: int = 3) -> str:
-    """Generate a unified diff for file overwrites."""
+    """Generate a unified diff for file writes (both new and overwrite).
+
+    CC-aligned: always produces a valid unified diff, even for new files
+    (full-addition diff with old_content="").
+    """
     old_lines = old_content.splitlines(keepends=True)
     new_lines = new_content.splitlines(keepends=True)
     diff = difflib.unified_diff(
@@ -27,7 +31,15 @@ def _generate_write_diff(old_content: str, new_content: str, file_path: str,
     if not result:
         return ""
     lines = result.splitlines()
-    if len(lines) > 60:
+    # New file: compact summary (first few + last few lines instead of all-additions)
+    if not old_content and len(lines) > 25:
+        # Keep header (2 lines) + first 8 content lines + summary + last 3 content lines
+        header = lines[:4]  # ---, +++, @@, first line
+        content_lines = lines[4:]
+        lines = header + content_lines[:8] + [
+            f"+... ({len(new_lines)} lines total, {len(content_lines) - 11} lines omitted)"
+        ] + content_lines[-3:]
+    elif len(lines) > 60:
         lines = lines[:55] + [f"... ({len(lines) - 55} more lines)"]
     return "\n".join(lines)
 
@@ -105,11 +117,15 @@ class FileWriteTool(BaseTool):
                     str(file_path), mtime=new_mtime, content_hash=new_hash
                 )
 
-            if is_new:
-                return f"Created {file_path} ({lines} lines)"
-
-            # Overwrite: show diff
+            # CC-aligned: always generate diff (new file = full-addition diff)
             diff = _generate_write_diff(old_content, content, str(file_path))
+
+            if is_new:
+                return (
+                    f"Created {file_path} ({lines} lines)\n"
+                    f"{diff}"
+                )
+
             return (
                 f"Overwrote {file_path} ({lines} lines)\n"
                 f"{diff}"

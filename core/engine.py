@@ -1300,12 +1300,36 @@ class LLMEngine(QObject):
             for tc, res in zip(tool_calls, results):
                 if tc.name in ("FileEdit", "FileWrite") and res and not res.get("is_error"):
                     output = res.get("output", "")
+                    # Robust diff detection: check for unified diff header patterns
+                    # Supports both "--- a/path" (standard) and "--- /dev/null" (new file)
+                    diff_start_idx = -1
+                    file_path_from_diff = ""
                     if "--- a/" in output:
-                        idx = output.index("--- a/")
-                        diff_text = output[idx:]
-                        first_line = diff_text.splitlines()[0] if diff_text else ""
-                        file_path = first_line[6:] if first_line.startswith("--- a/") else ""
-                        diff_data = {"file_path": file_path, "text": diff_text}
+                        diff_start_idx = output.index("--- a/")
+                        first_line = output[diff_start_idx:].splitlines()[0]
+                        file_path_from_diff = first_line[6:]  # strip "--- a/"
+                    elif "--- /dev/null" in output:
+                        # New file: diff starts at "--- /dev/null", get path from "+++ b/" line
+                        diff_start_idx = output.index("--- /dev/null")
+                        diff_lines = output[diff_start_idx:].splitlines()
+                        for dl in diff_lines[:3]:
+                            if dl.startswith("+++ b/"):
+                                file_path_from_diff = dl[6:]
+                                break
+                    elif "\n@@" in output or output.startswith("@@"):
+                        # Fallback: detect @@ hunk headers even without proper header
+                        # Try to extract file_path from the tool input
+                        file_path_from_diff = tc.input.get("file_path", "") if isinstance(tc.input, dict) else ""
+                        # Find the first @@ line and slice from there
+                        lines = output.splitlines(keepends=True)
+                        for i, line in enumerate(lines):
+                            if line.startswith("@@"):
+                                diff_start_idx = sum(len(l) for l in lines[:i])
+                                break
+
+                    if diff_start_idx >= 0:
+                        diff_text = output[diff_start_idx:]
+                        diff_data = {"file_path": file_path_from_diff, "text": diff_text}
                         # Find the message that contains this tool's result
                         for m in reversed(self._conversation._messages[-len(tool_calls) * 2:]):
                             mc = m.get("content")
@@ -1325,7 +1349,8 @@ class LLMEngine(QObject):
                                     continue
                                 break
                             # PromptTool: role=user with text containing [Tool Result: FileEdit]
-                            if isinstance(mc, str) and f"[Tool Result: {tc.name}]" in mc and "--- a/" in mc:
+                            if isinstance(mc, str) and f"[Tool Result: {tc.name}]" in mc \
+                               and ("--- a/" in mc or "--- /dev/null" in mc or "\n@@" in mc):
                                 m["_diff"] = diff_data
                                 break
 
