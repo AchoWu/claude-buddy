@@ -134,6 +134,16 @@ class BuddyApp:
             command_registry=None,  # TODO: wire CommandRegistry when created in main
         )
 
+        # ── Hook system (CC-aligned lifecycle hooks) ───────────────────
+        from core.services.hooks import HookRegistry
+        from core.services.builtin_hooks import destructive_guard
+        self._hook_registry = HookRegistry()
+        self._hook_registry.register(
+            "pre_tool_use", destructive_guard, name="destructive_guard"
+        )
+        self._hook_registry.load_from_config()  # user-defined hooks from settings.json
+        self.engine.set_hook_registry(self._hook_registry)
+
         # ── Cron Scheduler ─────────────────────────────────────────
         from core.cron.scheduler import CronScheduler
         from pathlib import Path

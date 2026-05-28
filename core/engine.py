@@ -1084,6 +1084,9 @@ class LLMEngine(QObject):
         self._msg_count_at_query_start = len(self._conversation._messages)
         self._msg_count_before_round = self._msg_count_at_query_start
 
+        # Track whether AskUser was called this turn (for destructive_guard hook)
+        self._ask_user_called_this_turn = False
+
         for round_num in range(MAX_TOOL_ROUNDS):
             # ── Step 1: Abort check ───────────────────────────────
             if self._abort_signal.aborted:
@@ -1574,6 +1577,7 @@ class LLMEngine(QObject):
         if self._hook_registry:
             hook_results = self._hook_registry.fire("pre_tool_use", {
                 "tool": tc.name, "input": tc.input, "round": round_num,
+                "ask_user_called_this_turn": self._ask_user_called_this_turn,
             })
             for hr in hook_results:
                 if hr.block:
@@ -1650,6 +1654,8 @@ class LLMEngine(QObject):
                 output_str = "[User did not respond within 5 minutes]"
             else:
                 output_str = self._ask_user_answer or "[No answer provided]"
+            # Track that AskUser was called (for destructive_guard hook)
+            self._ask_user_called_this_turn = True
             self.tool_result.emit(tc.name, output_str[:300])
             return {"output": output_str}
 
