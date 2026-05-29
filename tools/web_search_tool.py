@@ -93,17 +93,45 @@ class WebSearchTool(BaseTool):
         except Exception:
             return None
 
+    # Full Chrome UA — DDG returns 202+homepage if UA looks bot-like (truncated)
+    _CHROME_UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+
+    @staticmethod
+    def _has_cjk(s: str) -> bool:
+        """Detect if string contains CJK chars (for region routing)."""
+        return any('一' <= c <= '鿿' for c in s)
+
     def _try_ddg_html(self, httpx, query: str) -> str | None:
-        """DuckDuckGo HTML search — broader results, regex extraction."""
+        """DuckDuckGo HTML search — broader results, regex extraction.
+
+        Uses POST + full Chrome UA + region hint for Chinese queries.
+        Accepts 200 and 202 status codes (202 may still contain results).
+        """
         try:
-            resp = httpx.get(
+            # POST is more reliable than GET on html.duckduckgo.com
+            data = {"q": query}
+            # Region hint helps Chinese queries succeed
+            if self._has_cjk(query):
+                data["kl"] = "cn-zh"
+
+            resp = httpx.post(
                 "https://html.duckduckgo.com/html/",
-                params={"q": query},
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                data=data,
+                headers={
+                    "User-Agent": self._CHROME_UA,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+                    "Referer": "https://duckduckgo.com/",
+                },
                 timeout=15,
                 follow_redirects=True,
             )
-            if resp.status_code != 200:
+            # DDG returns 202 sometimes when rate-limited; the body may still have results
+            if resp.status_code not in (200, 202):
                 return None
 
             html = resp.text
