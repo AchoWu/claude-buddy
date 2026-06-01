@@ -27,6 +27,32 @@ logger = logging.getLogger(__name__)
 _IMAGE_EXTS = frozenset({'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'})
 
 
+# Tool output is considered an error if any of these prefixes appear in the head,
+# or if a non-zero "Exit code:" / stderr-only output is detected.
+_ERROR_PREFIXES = ("Error", "Error:", "Error executing", "Blocked by",
+                   "Fetch failed", "Warning:")
+
+
+def looks_like_error(output: str) -> bool:
+    """Heuristic: detect tool output that represents a failure.
+
+    Used by both real-time tool_result handler (main.py) and history-reload
+    paths (chat_dialog.py) to keep error styling consistent.
+    """
+    if not output:
+        return False
+    head = output[:200]
+    if head.startswith(_ERROR_PREFIXES):
+        return True
+    if "Exit code:" in output:
+        m = re.search(r"Exit code:\s*(-?\d+)", output)
+        if m and m.group(1) != "0":
+            return True
+    if "STDERR:" in head and "STDOUT:" not in head:
+        return True
+    return False
+
+
 # Keys checked (in order) when summarizing a tool-call's input for the bubble.
 # Must mirror main.py `_on_tool_start` so live + replayed summaries match.
 _TOOL_SUMMARY_KEYS = (
@@ -470,7 +496,10 @@ class MessageBubble(QFrame):
 
 
 class ToolCallBubble(QFrame):
-    """Inline tool call indicator with subtle styling."""
+    """Inline tool call indicator. Click to expand and see the tool's output."""
+
+    # Output rendering caps
+    _MAX_RENDER_CHARS = 8000  # truncate output rendered in the bubble
 
     def __init__(self, tool_name: str, summary: str = "", parent=None):
         super().__init__(parent)
@@ -478,17 +507,20 @@ class ToolCallBubble(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("background: transparent;")
 
-        # Icon + name + summary (truncate long summaries)
+        self._tool_name = tool_name
+        self._summary = summary
+        self._output_text: str = ""
+        self._is_error: bool = False
+        self._is_expanded: bool = False
+
+        # ── Header (clickable) ───────────────────────────────────
         display = summary[:30] + "..." + summary[-30:] if len(summary) > 60 else summary
-        self._label = QLabel(
-            f"<span style='color:{CLAUDE_ORANGE}'>&#9889;</span> "
-            f"<span style='color:rgba(255,255,255,180)'><b>{tool_name}</b></span>"
-            f"  <span style='color:rgba(255,255,255,90)'>{display}</span>"
-        )
-        self._label.setTextFormat(Qt.TextFormat.RichText)
-        self._label.setWordWrap(True)
-        self._label.setMaximumWidth(420)
-        self._label.setStyleSheet(f"""
+        self._header = QLabel(self._build_header_html(display))
+        self._header.setTextFormat(Qt.TextFormat.RichText)
+        self._header.setWordWrap(True)
+        self._header.setMaximumWidth(420)
+        self._header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._header.setStyleSheet(f"""
             QLabel {{
                 background: {MSG_BG_TOOL};
                 color: {TEXT_DIM};
@@ -497,12 +529,126 @@ class ToolCallBubble(QFrame):
                 padding: 6px 12px;
                 font-size: 11px;
             }}
+            QLabel:hover {{
+                background: rgba(50, 50, 50, 200);
+            }}
         """)
+        self._header.mousePressEvent = self._on_header_click
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(42, 2, 42, 2)  # indent to align with messages
-        layout.addWidget(self._label)
-        layout.addStretch()
+        # ── Output area (hidden until expanded) ───────────────────
+        self._output_label = QLabel("")
+        self._output_label.setTextFormat(Qt.TextFormat.RichText)
+        self._output_label.setWordWrap(True)
+        self._output_label.setMaximumWidth(420)
+        self._output_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._output_label.setStyleSheet(f"""
+            QLabel {{
+                background: rgba(20, 20, 20, 200);
+                color: rgba(255,255,255,200);
+                border-radius: 6px;
+                padding: 8px 10px;
+                font-family: Consolas, 'Courier New', monospace;
+                font-size: 11px;
+            }}
+        """)
+        self._output_label.hide()
+
+        # ── Stack header + output vertically ───────────────────────
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(3)
+        col.addWidget(self._header)
+        col.addWidget(self._output_label)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(42, 2, 42, 2)
+        outer.addLayout(col)
+        outer.addStretch()
+
+    # ── Public API ────────────────────────────────────────────────
+    def set_output(self, output_text: str, is_error: bool = False):
+        """Called by ChatDialog when tool_result arrives. Stores output and
+        auto-expands on errors so users notice immediately. Safe to call multiple
+        times — always refreshes header and (if expanded) output content."""
+        self._output_text = output_text or ""
+        self._is_error = is_error
+        # Refresh header (rebuilds HTML with error coloring if applicable)
+        display = self._summary[:30] + "..." + self._summary[-30:] if len(self._summary) > 60 else self._summary
+        self._header.setText(self._build_header_html(display))
+        # Force Qt to repaint immediately (label HTML changes don't always trigger redraw)
+        self._header.repaint()
+        # Auto-expand on errors so user notices the failure
+        if is_error and not self._is_expanded:
+            self._set_expanded(True)
+        elif self._is_expanded:
+            # Already expanded — refresh rendered content with new output
+            self._render_output()
+
+    # ── Internal ──────────────────────────────────────────────────
+    def _build_header_html(self, display: str) -> str:
+        # Chevron uses HTML entities for reliable cross-font rendering
+        chevron_char = "&#9660;" if self._is_expanded else "&#9654;"  # ▼ / ▶
+        if self._is_error:
+            # Error state: use a distinctive ❌ icon + bold red label
+            return (
+                f"<span style='color:{ERROR_RED}; font-size:13px;'>&#10060;</span> "
+                f"<span style='color:{ERROR_RED}; font-size:11px;'>{chevron_char}</span> "
+                f"<span style='color:{ERROR_RED}; font-weight:bold;'>{self._tool_name}</span> "
+                f"<span style='color:{ERROR_RED};'>(error)</span>  "
+                f"<span style='color:rgba(255,255,255,90)'>{display}</span>"
+            )
+        # Normal state
+        return (
+            f"<span style='color:{CLAUDE_ORANGE}'>&#9889;</span> "
+            f"<span style='color:{CLAUDE_ORANGE}; font-size:11px;'>{chevron_char}</span> "
+            f"<span style='color:rgba(255,255,255,180)'><b>{self._tool_name}</b></span>"
+            f"  <span style='color:rgba(255,255,255,90)'>{display}</span>"
+        )
+
+    def _on_header_click(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._set_expanded(not self._is_expanded)
+
+    def _set_expanded(self, expanded: bool):
+        self._is_expanded = expanded
+        display = self._summary[:30] + "..." + self._summary[-30:] if len(self._summary) > 60 else self._summary
+        self._header.setText(self._build_header_html(display))
+        if expanded:
+            self._render_output()
+            self._output_label.show()
+        else:
+            self._output_label.hide()
+
+    def _render_output(self):
+        """Render the stored output as HTML, with truncation and escaping."""
+        if not self._output_text:
+            # Output not yet received — show a friendly placeholder
+            self._output_label.setText(
+                "<span style='color:rgba(255,255,255,100); font-style:italic;'>"
+                "Tool is still running, output will appear here when ready..."
+                "</span>"
+            )
+            return
+        text = self._output_text
+        full_len = len(text)
+        if full_len > self._MAX_RENDER_CHARS:
+            head = self._MAX_RENDER_CHARS * 2 // 3
+            tail = self._MAX_RENDER_CHARS // 3
+            omitted = full_len - head - tail
+            text = (
+                text[:head]
+                + f"\n\n... [{omitted:,} chars truncated, total {full_len:,}] ...\n\n"
+                + text[-tail:]
+            )
+        # Escape HTML, preserve whitespace
+        escaped = (text.replace("&", "&amp;")
+                       .replace("<", "&lt;")
+                       .replace(">", "&gt;")
+                       .replace("\n", "<br>")
+                       .replace(" ", "&nbsp;"))
+        self._output_label.setText(escaped)
 
 
 class DiffBubble(QFrame):
@@ -980,6 +1126,12 @@ class ChatDialog(QWidget):
         self.resize(600, 720)
         self.setAcceptDrops(True)  # Enable drag & drop for files/images
 
+        # ── Tool bubble tracking ────────────────────────────────────
+        # tool_call_id → bubble (preferred — parallel-safe exact match)
+        self._tool_bubbles_by_id: dict[str, "ToolCallBubble"] = {}
+        # tool_name → FIFO queue of bubbles (fallback when id is missing)
+        self._pending_tool_bubbles: dict[str, list["ToolCallBubble"]] = {}
+
         # ── Resize state ────────────────────────────────────────────
         self._resize_edge = None      # which edge is being dragged
         self._resize_margin = 6       # px from edge to trigger resize cursor
@@ -1282,6 +1434,8 @@ class ChatDialog(QWidget):
 
         import json as _json
         has_any = False
+        # Map tool_call_id → ToolCallBubble so we can backfill outputs from tool/tool_result messages
+        tool_bubble_by_id: dict[str, "ToolCallBubble"] = {}
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
@@ -1300,19 +1454,34 @@ class ChatDialog(QWidget):
             if role == "system":
                 continue
 
-            # ── OpenAI tool result: role=tool ──
+            # ── OpenAI tool result: role=tool, has tool_call_id ──
             if role == "tool":
-                # Already handled _diff above; skip displaying raw tool output
+                tc_id = msg.get("tool_call_id", "")
+                bubble = tool_bubble_by_id.get(tc_id) if tc_id else None
+                if bubble is not None:
+                    raw = content if isinstance(content, str) else str(content)
+                    bubble.set_output(raw, is_error=looks_like_error(raw))
                 continue
 
-            # ── Anthropic tool_result: role=user, content is list of tool_result blocks ──
+            # ── Anthropic tool_result: role=user, content has tool_result blocks ──
             if role == "user" and isinstance(content, list):
-                has_tool_result = any(
-                    isinstance(b, dict) and b.get("type") == "tool_result"
-                    for b in content
-                )
+                has_tool_result = False
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        has_tool_result = True
+                        tc_id = block.get("tool_use_id", "")
+                        bubble = tool_bubble_by_id.get(tc_id) if tc_id else None
+                        if bubble is not None:
+                            # tool_result content can be str OR list of content blocks
+                            res = block.get("content", "")
+                            if isinstance(res, list):
+                                texts = [b.get("text", "") for b in res
+                                         if isinstance(b, dict) and b.get("type") == "text"]
+                                res = "\n".join(texts)
+                            elif not isinstance(res, str):
+                                res = str(res)
+                            bubble.set_output(res, is_error=looks_like_error(res))
                 if has_tool_result:
-                    # Already handled _diffs above; skip displaying raw tool results
                     continue
 
             # ── Extract text from various content formats ──
@@ -1333,14 +1502,17 @@ class ChatDialog(QWidget):
                     name = tu.get("name", "Tool")
                     inp = tu.get("input", {})
                     summary = _summarize_tool_input(inp)
-                    self.add_tool_call(name, summary[:120])
+                    bubble = self.add_tool_call(name, summary[:120])
+                    tu_id = tu.get("id", "")
+                    if tu_id:
+                        tool_bubble_by_id[tu_id] = bubble
                     has_any = True
                 content = "\n".join(text_parts) if text_parts else ""
 
             # ── OpenAI-style tool_calls field on assistant messages ──
             # (saved as {"role":"assistant", "content":"text", "tool_calls":[...]})
             # Collect tool_calls but render AFTER text (to match real-time order)
-            oai_tool_calls_to_render = []
+            oai_tool_calls_to_render = []  # list of (name, summary, tc_id)
             if role == "assistant":
                 oai_tool_calls = msg.get("tool_calls") or []
                 for tc in oai_tool_calls:
@@ -1354,12 +1526,14 @@ class ChatDialog(QWidget):
                     except (_json.JSONDecodeError, TypeError):
                         inp = {}
                     summary = _summarize_tool_input(inp) if isinstance(inp, dict) else str(inp)
-                    oai_tool_calls_to_render.append((name, summary[:120]))
+                    oai_tool_calls_to_render.append((name, summary[:120], tc.get("id", "")))
 
             if not isinstance(content, str) or not content.strip():
                 # No text content — render tool calls here
-                for name, summary in oai_tool_calls_to_render:
-                    self.add_tool_call(name, summary)
+                for name, summary, tc_id in oai_tool_calls_to_render:
+                    bubble = self.add_tool_call(name, summary)
+                    if tc_id:
+                        tool_bubble_by_id[tc_id] = bubble
                     has_any = True
                 continue
 
@@ -1404,8 +1578,10 @@ class ChatDialog(QWidget):
                             self.add_assistant_message(part, timestamp=ts)
 
                 # Render OpenAI tool_calls AFTER assistant text (matches real-time order)
-                for name, summary in oai_tool_calls_to_render:
-                    self.add_tool_call(name, summary)
+                for name, summary, tc_id in oai_tool_calls_to_render:
+                    bubble = self.add_tool_call(name, summary)
+                    if tc_id:
+                        tool_bubble_by_id[tc_id] = bubble
                     has_any = True
 
         # Done loading — scroll to bottom once, then re-enable auto-scroll
@@ -1436,9 +1612,49 @@ class ChatDialog(QWidget):
         self._streaming_bubble.append_text(chunk)
         self._scroll_to_bottom()
 
-    def add_tool_call(self, tool_name: str, summary: str = ""):
+    def add_tool_call(self, tool_name: str, summary: str = "",
+                      tool_call_id: str = "") -> "ToolCallBubble":
+        """Insert a tool call bubble; return it so caller can fill output later.
+
+        If tool_call_id is provided, the bubble is registered in the id→bubble map
+        for exact matching (avoids FIFO race in parallel tool execution).
+        Falls back to per-tool-name FIFO queue when id is missing (legacy path).
+        """
         bubble = ToolCallBubble(tool_name, summary)
         self._insert_message(bubble)
+        if tool_call_id:
+            self._tool_bubbles_by_id[tool_call_id] = bubble
+        # Always also push onto FIFO queue (used as fallback when id is unknown)
+        self._pending_tool_bubbles.setdefault(tool_name, []).append(bubble)
+        return bubble
+
+    def set_tool_output(self, tool_name: str, output: str,
+                        tool_call_id: str = "", is_error: bool = False):
+        """Attach output to the matching ToolCallBubble.
+
+        Match priority:
+          1. Exact match by tool_call_id (preferred, parallel-safe)
+          2. FIFO queue per tool name (fallback for missing/legacy ids)
+        """
+        bubble = None
+        if tool_call_id:
+            bubble = self._tool_bubbles_by_id.pop(tool_call_id, None)
+            # Also remove from FIFO queue to keep it consistent
+            queue = self._pending_tool_bubbles.get(tool_name)
+            if bubble is not None and queue and bubble in queue:
+                queue.remove(bubble)
+        if bubble is None:
+            # Fallback: FIFO match
+            queue = self._pending_tool_bubbles.get(tool_name)
+            if queue:
+                bubble = queue.pop(0)
+        if bubble is not None:
+            bubble.set_output(output, is_error=is_error)
+
+    @staticmethod
+    def _looks_like_error(output: str) -> bool:
+        """Backwards-compatible thin wrapper — kept in case external callers reference it."""
+        return looks_like_error(output)
 
     def add_diff_result(self, file_path: str, diff_text: str):
         """CC-aligned: show diff inline immediately after FileEdit/FileWrite."""
@@ -1609,6 +1825,9 @@ class ChatDialog(QWidget):
             if item and item.widget():
                 item.widget().deleteLater()
         self._streaming_bubble = None
+        # Clear tool bubble tracking — bubbles are gone, queues/maps stale
+        self._pending_tool_bubbles.clear()
+        self._tool_bubbles_by_id.clear()
 
     def _on_clear(self):
         """User clicked clear button — clear UI and emit signal."""

@@ -205,8 +205,8 @@ class LLMEngine(QObject):
     response_text = pyqtSignal(str)       # final text reply
     response_chunk = pyqtSignal(str)      # streaming text fragment
     intermediate_text = pyqtSignal(str)   # mid-loop text (shown alongside tool calls)
-    tool_start = pyqtSignal(str, dict)    # tool name, input
-    tool_result = pyqtSignal(str, str)    # tool name, output
+    tool_start = pyqtSignal(str, dict, str)    # tool name, input, tool_call_id
+    tool_result = pyqtSignal(str, str, str)    # tool name, output, tool_call_id
     state_changed = pyqtSignal(str)       # pet state: idle/working/etc.
     error = pyqtSignal(str)               # error message
     cost_updated = pyqtSignal(str)        # cost summary string
@@ -1570,7 +1570,7 @@ class LLMEngine(QObject):
             return {"output": "Operation cancelled by user.", "is_error": True}
 
         if not _skip_start_signal:
-            self.tool_start.emit(tc.name, tc.input)
+            self.tool_start.emit(tc.name, tc.input, tc.id or "")
         time.sleep(0.05)
         self._session_cost.add_tool_call()
 
@@ -1582,14 +1582,14 @@ class LLMEngine(QObject):
             })
             for hr in hook_results:
                 if hr.block:
-                    self.tool_result.emit(tc.name, f"Blocked by hook: {hr.output}")
+                    self.tool_result.emit(tc.name, f"Blocked by hook: {hr.output}", tc.id or "")
                     return {"output": f"Blocked by pre_tool_use hook: {hr.output}", "is_error": True}
 
         # Plan mode check
         if self._plan_mode_state and self._plan_mode_state.active:
             if not self._tool_read_only.get(tc.name, False):
                 if tc.name not in ("EnterPlanMode", "ExitPlanMode"):
-                    self.tool_result.emit(tc.name, "Blocked by plan mode")
+                    self.tool_result.emit(tc.name, "Blocked by plan mode", tc.id or "")
                     return {
                         "output": (
                             f"Plan mode is active. {tc.name} is blocked because it is not read-only. "
@@ -1617,7 +1617,7 @@ class LLMEngine(QObject):
                     self._denied_tools.append({
                         "tool": tc.name, "action": action, "round": round_num,
                     })
-                    self.tool_result.emit(tc.name, "Permission denied")
+                    self.tool_result.emit(tc.name, "Permission denied", tc.id or "")
                     return {
                         "output": (
                             f"User denied permission for {tc.name} (action={action}). "
@@ -1657,7 +1657,7 @@ class LLMEngine(QObject):
                 output_str = self._ask_user_answer or "[No answer provided]"
             # Track the round AskUser was called (for destructive_guard hook)
             self._ask_user_round = round_num
-            self.tool_result.emit(tc.name, output_str[:300])
+            self.tool_result.emit(tc.name, output_str[:300], tc.id or "")
             return {"output": output_str}
 
         # ── Screenshot special handling: block engine, wait for main thread capture ──
@@ -1676,11 +1676,11 @@ class LLMEngine(QObject):
             if self._abort_signal.aborted:
                 return {"output": "Operation cancelled by user.", "is_error": True}
             if not captured or not self._screenshot_result:
-                self.tool_result.emit(tc.name, "Screenshot cancelled or timed out")
+                self.tool_result.emit(tc.name, "Screenshot cancelled or timed out", tc.id or "")
                 return {"output": "Screenshot was cancelled or timed out.", "is_error": True}
 
             # Return structured image result (format_tool_results will create image block)
-            self.tool_result.emit(tc.name, f"[Screenshot captured ({self._screenshot_result.get('media_type', 'image/jpeg')})]")
+            self.tool_result.emit(tc.name, f"[Screenshot captured ({self._screenshot_result.get('media_type', 'image/jpeg')})]", tc.id or "")
             return {"output": self._screenshot_result}
 
         # Execute
@@ -1710,11 +1710,9 @@ class LLMEngine(QObject):
                     + output_str[-tail_size:]
                 )
             # CC-aligned: emit full output for file tools (UI renders diff directly)
-            # For other tools, truncate to 300 for the signal
-            if tc.name in ("FileEdit", "FileWrite"):
-                self.tool_result.emit(tc.name, output_str)
-            else:
-                self.tool_result.emit(tc.name, output_str[:300])
+            # Other tools: emit full output too, capped at MAX_TOOL_RESULT_CHARS
+            # (already truncated above) so UI can offer expand-to-view.
+            self.tool_result.emit(tc.name, output_str, tc.id or "")
             # CC-aligned: fire post_tool_use hook (non-blocking)
             if self._hook_registry:
                 self._hook_registry.fire_async("post_tool_use", {
@@ -1723,7 +1721,7 @@ class LLMEngine(QObject):
             return {"output": output_str}
         except Exception as e:
             error_msg = f"Error executing {tc.name}: {e}"
-            self.tool_result.emit(tc.name, error_msg[:300])
+            self.tool_result.emit(tc.name, error_msg[:300], tc.id or "")
             # CC-aligned: fire on_error hook
             if self._hook_registry:
                 self._hook_registry.fire_async("on_error", {
@@ -1753,7 +1751,7 @@ class LLMEngine(QObject):
 
         # Emit tool_start for all tools
         for tc in tool_calls:
-            self.tool_start.emit(tc.name, tc.input)
+            self.tool_start.emit(tc.name, tc.input, tc.id or "")
         time.sleep(0.05)
 
         # CC: partition into batches — consecutive safe → parallel, unsafe → alone

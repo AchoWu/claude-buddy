@@ -523,7 +523,7 @@ class BuddyApp:
                 self._chat_dialog._streaming_bubble = None
             self._chat_dialog.add_assistant_message(text)
 
-    def _on_tool_start(self, name: str, input_data: dict):
+    def _on_tool_start(self, name: str, input_data: dict, tool_call_id: str = ""):
         if getattr(self, '_ui_abort_active', False):
             return
         if self._chat_dialog:
@@ -546,12 +546,25 @@ class BuddyApp:
                 summary = summary[:120]
             else:
                 summary = str(summary)[:120]
-            self._chat_dialog.add_tool_call(name, summary)
+            self._chat_dialog.add_tool_call(name, summary, tool_call_id=tool_call_id)
 
-    def _on_tool_result(self, name: str, output: str):
-        """Tool execution completed. CC-aligned: render diff inline for file tools."""
+    def _on_tool_result(self, name: str, output: str, tool_call_id: str = ""):
+        """Tool execution completed. CC-aligned: render diff inline for file tools.
+        For all tools, also attach output to the most recent ToolCallBubble so the
+        user can click to expand and inspect the raw output."""
         if not self._chat_dialog:
             return
+
+        # Detect error output (delegates to chat_dialog.looks_like_error)
+        from ui.chat_dialog import looks_like_error
+        is_error = looks_like_error(output)
+
+        # Attach to bubble for expansion (matched by tool_call_id when available)
+        self._chat_dialog.set_tool_output(
+            name, output, tool_call_id=tool_call_id, is_error=is_error
+        )
+
+        # File tools: also render inline DiffBubble (existing behavior)
         if name in ("FileEdit", "FileWrite"):
             # Robust diff detection: support "--- a/path" (edit/overwrite)
             # and "--- /dev/null" (new file creation)
