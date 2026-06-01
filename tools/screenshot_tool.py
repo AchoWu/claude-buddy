@@ -23,6 +23,12 @@ class ScreenshotTool(BaseTool):
         "- active_window: Capture the currently focused window (default, recommended)\n"
         "- full: Capture the entire screen\n"
         "- region: Let the user select a specific area to capture\n\n"
+        "Optional save_path:\n"
+        "- Provide an absolute path (e.g. 'C:/Users/foo/Desktop/shot.png') to save\n"
+        "  the screenshot to disk in addition to in-memory analysis.\n"
+        "- Useful when the model wants to share the file with the user, or for\n"
+        "  non-vision conversation models that can't see image data directly.\n"
+        "- The file path will appear in the tool's result text so you can reference it.\n\n"
         "The screenshot will be sent as an image for you to analyze. "
         "Describe what you see and provide relevant help based on the prompt."
     )
@@ -45,6 +51,15 @@ class ScreenshotTool(BaseTool):
                     "What to analyze in the screenshot. Be specific about what you're "
                     "looking for (e.g., 'What error is shown?', 'Describe this UI layout', "
                     "'Read the text in this dialog')."
+                ),
+            },
+            "save_path": {
+                "type": "string",
+                "description": (
+                    "Optional absolute path to save the screenshot as a PNG file. "
+                    "When provided, the screenshot is saved to disk and the saved "
+                    "path is included in the tool result. Parent directories are "
+                    "created automatically. Existing files are overwritten."
                 ),
             },
         },

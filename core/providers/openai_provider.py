@@ -132,11 +132,27 @@ class OpenAIProvider(BaseProvider):
 
             # OpenAI doesn't support image blocks in tool results — degrade to text
             if isinstance(output, dict) and output.get("type") == "image_result":
-                output = (
+                saved_path = output.get("saved_path", "")
+                base = (
                     f"[Screenshot captured ({output.get('media_type', 'image/jpeg')}). "
                     f"Note: Current model does not support image analysis in tool results. "
                     f"User's request: {output.get('text', 'N/A')}]"
                 )
+                if saved_path:
+                    # Tell the model where the file is so it can read/share it.
+                    # FileRead on an image populates engine._pending_image, which
+                    # AnalyzeImage then consumes — so the call chain is:
+                    #   FileRead(saved_path)  →  AnalyzeImage(prompt)
+                    output = (
+                        f"{base}\n"
+                        f"Screenshot saved to: {saved_path}\n"
+                        f"To analyze it, call FileRead with this exact path "
+                        f"(this loads the image into memory), then call "
+                        f"AnalyzeImage with a prompt to get a vision-model "
+                        f"description."
+                    )
+                else:
+                    output = base
 
             tool_messages.append({
                 "role": "tool",

@@ -7,9 +7,19 @@ Transforms messages before sending to the API:
 2. Merge consecutive user messages (Bedrock requirement, good practice)
 3. Remove orphaned tool_result blocks (no matching tool_use)
 4. Strip empty messages
+5. Strip BUDDY-private metadata (keys starting with "_") so engine-internal
+   flags like _is_error / _diff / _thinking never leak to the API
 """
 
 from typing import Any
+
+
+def _strip_private_keys(d: dict) -> dict:
+    """Return a copy of d with all keys starting with '_' removed.
+    BUDDY uses '_'-prefixed keys for engine-internal metadata (e.g. _is_error,
+    _diff, _thinking, _reasoning, _usage). These must NOT be sent to the LLM API.
+    """
+    return {k: v for k, v in d.items() if not k.startswith("_")}
 
 
 def normalize_messages(messages: list[dict]) -> list[dict]:
@@ -82,4 +92,18 @@ def normalize_messages(messages: list[dict]) -> list[dict]:
         else:
             merged.append(msg)
 
-    return merged
+    # Pass 5: strip BUDDY-private '_'-prefixed keys (e.g. _is_error, _diff,
+    # _thinking, _reasoning, _usage) so they never reach the LLM API. Both
+    # message-level and content-block-level keys are stripped.
+    final = []
+    for msg in merged:
+        cleaned_msg = _strip_private_keys(msg)
+        content = cleaned_msg.get("content")
+        if isinstance(content, list):
+            cleaned_msg["content"] = [
+                _strip_private_keys(b) if isinstance(b, dict) else b
+                for b in content
+            ]
+        final.append(cleaned_msg)
+
+    return final

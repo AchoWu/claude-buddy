@@ -27,29 +27,36 @@ logger = logging.getLogger(__name__)
 _IMAGE_EXTS = frozenset({'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'})
 
 
-# Tool output is considered an error if any of these prefixes appear in the head,
-# or if a non-zero "Exit code:" / stderr-only output is detected.
-_ERROR_PREFIXES = ("Error", "Error:", "Error executing", "Blocked by",
-                   "Fetch failed", "Warning:")
+# ── History-reload error fallback ──
+# Live tool execution flows is_error from engine signal (authoritative).
+# New conversations also persist `is_error` (Anthropic) / `_is_error` (OpenAI)
+# directly on each tool result so reload uses that exact flag.
+# This fallback only fires for OLD saved conversations that never recorded the
+# flag. Conservative on purpose: only matches BUDDY-emitted error prefixes plus
+# Bash/PowerShell exit codes (the common pre-9a error path for shell tools).
+_HISTORY_ERROR_PREFIXES = ("Error:", "Error executing", "Blocked by",
+                           "Fetch failed", "Permission denied")
 
 
-def looks_like_error(output: str) -> bool:
-    """Heuristic: detect tool output that represents a failure.
+def looks_like_error_in_history(output: str) -> bool:
+    """Coarse fallback for legacy historical tool output without is_error flag.
 
-    Used by both real-time tool_result handler (main.py) and history-reload
-    paths (chat_dialog.py) to keep error styling consistent.
+    New conversations carry the authoritative flag saved by the engine, so this
+    is a backstop for old saved sessions only. Conservative on purpose: only
+    matches structural prefixes BUDDY itself uses, plus non-zero shell exit
+    codes (the common Bash/PowerShell error format).
     """
     if not output:
         return False
     head = output[:200]
-    if head.startswith(_ERROR_PREFIXES):
+    if head.startswith(_HISTORY_ERROR_PREFIXES):
         return True
+    # Bash/PowerShell: non-zero exit code (only safe in fallback path —
+    # may false-positive if a tool description contains "Exit code: 1")
     if "Exit code:" in output:
         m = re.search(r"Exit code:\s*(-?\d+)", output)
         if m and m.group(1) != "0":
             return True
-    if "STDERR:" in head and "STDOUT:" not in head:
-        return True
     return False
 
 
@@ -1460,7 +1467,12 @@ class ChatDialog(QWidget):
                 bubble = tool_bubble_by_id.get(tc_id) if tc_id else None
                 if bubble is not None:
                     raw = content if isinstance(content, str) else str(content)
-                    bubble.set_output(raw, is_error=looks_like_error(raw))
+                    # Prefer authoritative flag saved by engine; fallback to coarse heuristic
+                    if "_is_error" in msg:
+                        is_err = bool(msg["_is_error"])
+                    else:
+                        is_err = looks_like_error_in_history(raw)
+                    bubble.set_output(raw, is_error=is_err)
                 continue
 
             # ── Anthropic tool_result: role=user, content has tool_result blocks ──
@@ -1480,7 +1492,14 @@ class ChatDialog(QWidget):
                                 res = "\n".join(texts)
                             elif not isinstance(res, str):
                                 res = str(res)
-                            bubble.set_output(res, is_error=looks_like_error(res))
+                            # Priority: official Anthropic is_error → legacy _is_error → heuristic
+                            if "is_error" in block:
+                                is_err = bool(block["is_error"])
+                            elif "_is_error" in block:
+                                is_err = bool(block["_is_error"])
+                            else:
+                                is_err = looks_like_error_in_history(res)
+                            bubble.set_output(res, is_error=is_err)
                 if has_tool_result:
                     continue
 
@@ -1650,11 +1669,6 @@ class ChatDialog(QWidget):
                 bubble = queue.pop(0)
         if bubble is not None:
             bubble.set_output(output, is_error=is_error)
-
-    @staticmethod
-    def _looks_like_error(output: str) -> bool:
-        """Backwards-compatible thin wrapper — kept in case external callers reference it."""
-        return looks_like_error(output)
 
     def add_diff_result(self, file_path: str, diff_text: str):
         """CC-aligned: show diff inline immediately after FileEdit/FileWrite."""

@@ -179,6 +179,7 @@ class BuddyApp:
         self._screenshot_overlay.region_selected.connect(self._on_region_captured)
         self._screenshot_overlay.cancelled.connect(self._on_screenshot_cancelled)
         self._pending_screenshot_prompt: str = ""
+        self._pending_screenshot_save_path: str = ""
 
         # Initialize provider
         self._refresh_provider()
@@ -284,11 +285,12 @@ class BuddyApp:
             self.engine.resolve_ask_user(f"[Error: {e}]")
 
     # ── Screenshot handlers ──────────────────────────────────────────
-    def _on_screenshot_requested(self, mode: str, prompt: str):
+    def _on_screenshot_requested(self, mode: str, prompt: str, save_path: str = ""):
         """Engine requests a screenshot — execute capture on main thread."""
         from core.vision import ScreenCapture
 
         self._pending_screenshot_prompt = prompt
+        self._pending_screenshot_save_path = save_path
 
         if mode == "region":
             # Show overlay for user to select area
@@ -312,6 +314,9 @@ class BuddyApp:
     def _on_screenshot_cancelled(self):
         """User pressed ESC or right-clicked in the overlay."""
         self.engine.resolve_screenshot({})  # empty dict signals cancellation
+        # Clear pending state so the next screenshot doesn't reuse stale fields
+        self._pending_screenshot_prompt = ""
+        self._pending_screenshot_save_path = ""
 
     def _on_screenshot_from_menu(self):
         """User triggered screenshot from context menu — capture active window and send via Vision pipeline."""
@@ -334,36 +339,86 @@ class BuddyApp:
         self.pet.set_pet_state(PetState.WORKING)
         self.engine.send_message_with_image(prompt, b64)
 
+    @staticmethod
+    def _is_subpath(p: "Path", root: "Path") -> bool:
+        """True if p is the same as or below root. Both must be resolved."""
+        try:
+            return p.is_relative_to(root)
+        except (ValueError, AttributeError):
+            return False
+
     def _complete_screenshot(self, pixmap):
-        """Compress screenshot, encode base64, and resolve the engine's wait."""
+        """Compress screenshot, encode base64, optionally save to disk, and resolve."""
         from core.vision import ScreenCapture
         from PyQt6.QtGui import QPixmap
+        from pathlib import Path
 
-        if pixmap.isNull():
-            self.engine.resolve_screenshot({})
-            return
+        try:
+            if pixmap.isNull():
+                self.engine.resolve_screenshot({})
+                return
 
-        b64 = ScreenCapture.pixmap_to_base64(pixmap)
-        if not b64:
-            self.engine.resolve_screenshot({})
-            return
+            b64 = ScreenCapture.pixmap_to_base64(pixmap)
+            if not b64:
+                self.engine.resolve_screenshot({})
+                return
 
-        # Optionally show thumbnail in chat
-        if self._chat_dialog:
-            self._chat_dialog.add_tool_call(
-                "Screenshot",
-                f"Captured ({pixmap.width()}×{pixmap.height()}, "
-                f"~{ScreenCapture.estimate_tokens(b64):,} tokens)"
-            )
+            # Optional: save to disk if model passed save_path
+            saved_path: str = ""
+            save_path_req = (self._pending_screenshot_save_path or "").strip()
+            if save_path_req:
+                try:
+                    p = Path(save_path_req).expanduser().resolve()
+                    # Whitelist: must be under home / cwd / BUDDY data dir.
+                    # Prevents the model from writing to system paths or escaping
+                    # via traversal (e.g. "../../etc/passwd").
+                    allowed_roots = [
+                        Path.home().resolve(),
+                        Path.cwd().resolve(),
+                        Path(DATA_DIR).resolve(),
+                    ]
+                    if not any(self._is_subpath(p, root) for root in allowed_roots):
+                        logger.warning(
+                            f"Refusing to save screenshot outside allowed dirs: {p}"
+                        )
+                    else:
+                        # Force .png/.jpg extension for QPixmap.save reliability
+                        if p.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                            p = p.with_suffix(".png")
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        fmt = "PNG" if p.suffix.lower() == ".png" else "JPG"
+                        if pixmap.save(str(p), fmt, 90):
+                            saved_path = str(p)
+                            logger.info(f"Screenshot saved to {saved_path}")
+                        else:
+                            logger.warning(f"Failed to save screenshot to {p}")
+                except Exception as e:
+                    logger.error(f"Error saving screenshot to {save_path_req}: {e}")
 
-        # Construct CC-aligned structured image result
-        result = {
-            "type": "image_result",
-            "data": b64,
-            "media_type": "image/jpeg",
-            "text": self._pending_screenshot_prompt,
-        }
-        self.engine.resolve_screenshot(result)
+            # Show thumbnail bubble in chat
+            if self._chat_dialog:
+                summary = (
+                    f"Captured ({pixmap.width()}×{pixmap.height()}, "
+                    f"~{ScreenCapture.estimate_tokens(b64):,} tokens)"
+                )
+                if saved_path:
+                    summary += f" → {saved_path}"
+                self._chat_dialog.add_tool_call("Screenshot", summary)
+
+            # Construct CC-aligned structured image result
+            result = {
+                "type": "image_result",
+                "data": b64,
+                "media_type": "image/jpeg",
+                "text": self._pending_screenshot_prompt,
+            }
+            if saved_path:
+                result["saved_path"] = saved_path
+            self.engine.resolve_screenshot(result)
+        finally:
+            # Always clear pending state so the next screenshot doesn't reuse stale fields
+            self._pending_screenshot_prompt = ""
+            self._pending_screenshot_save_path = ""
 
     # ── Chat dialog ──────────────────────────────────────────────────
     def _open_chat(self):
@@ -548,16 +603,16 @@ class BuddyApp:
                 summary = str(summary)[:120]
             self._chat_dialog.add_tool_call(name, summary, tool_call_id=tool_call_id)
 
-    def _on_tool_result(self, name: str, output: str, tool_call_id: str = ""):
+    def _on_tool_result(self, name: str, output: str, tool_call_id: str = "", is_error: bool = False):
         """Tool execution completed. CC-aligned: render diff inline for file tools.
         For all tools, also attach output to the most recent ToolCallBubble so the
-        user can click to expand and inspect the raw output."""
+        user can click to expand and inspect the raw output.
+
+        is_error is set authoritatively by the engine (try/except, hook block,
+        permission denied, abort, etc.) — no string sniffing required.
+        """
         if not self._chat_dialog:
             return
-
-        # Detect error output (delegates to chat_dialog.looks_like_error)
-        from ui.chat_dialog import looks_like_error
-        is_error = looks_like_error(output)
 
         # Attach to bubble for expansion (matched by tool_call_id when available)
         self._chat_dialog.set_tool_output(

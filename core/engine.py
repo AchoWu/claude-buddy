@@ -206,13 +206,13 @@ class LLMEngine(QObject):
     response_chunk = pyqtSignal(str)      # streaming text fragment
     intermediate_text = pyqtSignal(str)   # mid-loop text (shown alongside tool calls)
     tool_start = pyqtSignal(str, dict, str)    # tool name, input, tool_call_id
-    tool_result = pyqtSignal(str, str, str)    # tool name, output, tool_call_id
+    tool_result = pyqtSignal(str, str, str, bool)    # tool name, output, tool_call_id, is_error
     state_changed = pyqtSignal(str)       # pet state: idle/working/etc.
     error = pyqtSignal(str)               # error message
     cost_updated = pyqtSignal(str)        # cost summary string
     plan_mode_changed = pyqtSignal(bool)  # plan mode toggled
     ask_user = pyqtSignal(str, object, bool)  # question, options(list), multiSelect
-    screenshot_requested = pyqtSignal(str, str)  # (mode, prompt) — triggers main thread capture
+    screenshot_requested = pyqtSignal(str, str, str)  # (mode, prompt, save_path) — triggers main thread capture
 
     # ── Retry config (CC: withRetry.ts BASE_DELAY_MS=500, max 10 retries) ──
     MAX_RETRIES = 10
@@ -1296,6 +1296,48 @@ class LLMEngine(QObject):
             else:
                 self._conversation._messages.append(tool_result_msg)
 
+            # ── Step 9a: Tag is_error metadata on tool result messages ──
+            # Engine knows authoritatively whether each tool succeeded or failed
+            # (try/except, hook block, permission denied, abort, etc.). Persist
+            # this to the conversation so history-reload can color the bubble
+            # correctly without re-deriving error state from output strings.
+            #
+            # Anthropic: tool_result blocks have an OFFICIAL is_error field —
+            #   we set it directly (provider would set it anyway in format_tool_results,
+            #   but tagging here ensures persistence in the message list too).
+            # OpenAI: no official field on role=tool messages — we use BUDDY-private
+            #   _is_error (stripped by normalize_messages before API call).
+            for tc, res in zip(tool_calls, results):
+                if not res:
+                    continue
+                is_err = bool(res.get("is_error", False))
+                # Find the message this tool's result lives in (recently appended)
+                recent = self._conversation._messages[-len(tool_calls) * 2:]
+                for m in reversed(recent):
+                    mc = m.get("content")
+                    # OpenAI: role=tool, content is str, identified by tool_call_id
+                    if m.get("role") == "tool" and m.get("tool_call_id") == tc.id:
+                        m["_is_error"] = is_err  # private — stripped on API call
+                        break
+                    # Anthropic: role=user, content is list with tool_result blocks.
+                    # We tag the *block*, not the message (one msg may carry many).
+                    if isinstance(mc, list):
+                        tagged = False
+                        for block in mc:
+                            if (isinstance(block, dict)
+                                    and block.get("type") == "tool_result"
+                                    and block.get("tool_use_id") == tc.id):
+                                # Use OFFICIAL Anthropic is_error field (no underscore)
+                                if is_err:
+                                    block["is_error"] = True
+                                else:
+                                    # Explicitly clear if previously set
+                                    block.pop("is_error", None)
+                                tagged = True
+                                break
+                        if tagged:
+                            break
+
             # ── Step 9b: Tag diff metadata on tool result messages ──
             # CC-aligned: UI renders diffs directly from structured data.
             # Attach _diff to the correct tool result message for persistence.
@@ -1582,14 +1624,14 @@ class LLMEngine(QObject):
             })
             for hr in hook_results:
                 if hr.block:
-                    self.tool_result.emit(tc.name, f"Blocked by hook: {hr.output}", tc.id or "")
+                    self.tool_result.emit(tc.name, f"Blocked by hook: {hr.output}", tc.id or "", True)
                     return {"output": f"Blocked by pre_tool_use hook: {hr.output}", "is_error": True}
 
         # Plan mode check
         if self._plan_mode_state and self._plan_mode_state.active:
             if not self._tool_read_only.get(tc.name, False):
                 if tc.name not in ("EnterPlanMode", "ExitPlanMode"):
-                    self.tool_result.emit(tc.name, "Blocked by plan mode", tc.id or "")
+                    self.tool_result.emit(tc.name, "Blocked by plan mode", tc.id or "", True)
                     return {
                         "output": (
                             f"Plan mode is active. {tc.name} is blocked because it is not read-only. "
@@ -1617,7 +1659,7 @@ class LLMEngine(QObject):
                     self._denied_tools.append({
                         "tool": tc.name, "action": action, "round": round_num,
                     })
-                    self.tool_result.emit(tc.name, "Permission denied", tc.id or "")
+                    self.tool_result.emit(tc.name, "Permission denied", tc.id or "", True)
                     return {
                         "output": (
                             f"User denied permission for {tc.name} (action={action}). "
@@ -1657,17 +1699,19 @@ class LLMEngine(QObject):
                 output_str = self._ask_user_answer or "[No answer provided]"
             # Track the round AskUser was called (for destructive_guard hook)
             self._ask_user_round = round_num
-            self.tool_result.emit(tc.name, output_str[:300], tc.id or "")
+            # Timeout = error; user provided answer = success
+            self.tool_result.emit(tc.name, output_str[:300], tc.id or "", not answered)
             return {"output": output_str}
 
         # ── Screenshot special handling: block engine, wait for main thread capture ──
         if tc.name == "Screenshot":
             mode = tc.input.get("mode", "active_window")
             prompt = tc.input.get("prompt", "Describe what you see in the screenshot")
+            save_path = tc.input.get("save_path", "") or ""
 
             self._screenshot_event.clear()
             self._screenshot_result = {}
-            self.screenshot_requested.emit(mode, prompt)
+            self.screenshot_requested.emit(mode, prompt, save_path)
 
             # Block until main thread completes capture (30s timeout)
             from config import SCREENSHOT_TIMEOUT_SEC
@@ -1676,11 +1720,17 @@ class LLMEngine(QObject):
             if self._abort_signal.aborted:
                 return {"output": "Operation cancelled by user.", "is_error": True}
             if not captured or not self._screenshot_result:
-                self.tool_result.emit(tc.name, "Screenshot cancelled or timed out", tc.id or "")
+                self.tool_result.emit(tc.name, "Screenshot cancelled or timed out", tc.id or "", True)
                 return {"output": "Screenshot was cancelled or timed out.", "is_error": True}
 
-            # Return structured image result (format_tool_results will create image block)
-            self.tool_result.emit(tc.name, f"[Screenshot captured ({self._screenshot_result.get('media_type', 'image/jpeg')})]", tc.id or "")
+            # Build a human-readable result line; include saved_path if present.
+            saved_path = self._screenshot_result.get("saved_path", "")
+            media_type = self._screenshot_result.get("media_type", "image/jpeg")
+            if saved_path:
+                result_text = f"[Screenshot captured ({media_type}); saved to: {saved_path}]"
+            else:
+                result_text = f"[Screenshot captured ({media_type})]"
+            self.tool_result.emit(tc.name, result_text, tc.id or "", False)
             return {"output": self._screenshot_result}
 
         # Execute
@@ -1712,7 +1762,8 @@ class LLMEngine(QObject):
             # CC-aligned: emit full output for file tools (UI renders diff directly)
             # Other tools: emit full output too, capped at MAX_TOOL_RESULT_CHARS
             # (already truncated above) so UI can offer expand-to-view.
-            self.tool_result.emit(tc.name, output_str, tc.id or "")
+            # Successful tool execution → is_error=False
+            self.tool_result.emit(tc.name, output_str, tc.id or "", False)
             # CC-aligned: fire post_tool_use hook (non-blocking)
             if self._hook_registry:
                 self._hook_registry.fire_async("post_tool_use", {
@@ -1721,7 +1772,7 @@ class LLMEngine(QObject):
             return {"output": output_str}
         except Exception as e:
             error_msg = f"Error executing {tc.name}: {e}"
-            self.tool_result.emit(tc.name, error_msg[:300], tc.id or "")
+            self.tool_result.emit(tc.name, error_msg[:300], tc.id or "", True)
             # CC-aligned: fire on_error hook
             if self._hook_registry:
                 self._hook_registry.fire_async("on_error", {
